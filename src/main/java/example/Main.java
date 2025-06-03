@@ -12,7 +12,7 @@ public class Main {
         String path = "data";
         LSMStorageEngine lsmStorageEngine = new LSMStorageEngine(path);
         for (int i = 0; i < 10000; i++){
-            lsmStorageEngine.put(("key" + i).getBytes(StandardCharsets.UTF_8), ("value" + i));
+            lsmStorageEngine.put(("key" + i).getBytes(StandardCharsets.UTF_8), ("v" + i));
         }
         lsmStorageEngine.close();
     }
