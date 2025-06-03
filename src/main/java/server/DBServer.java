@@ -1,9 +1,16 @@
 package server;
 
+import cluster.ClusterConfig;
+import cluster.ClusterNode;
+import cluster.MasterNode;
+import cluster.SlaveNode;
 import core.LSMStorageEngine;
+import util.ConfigLoader;
+
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 public class DBServer {
     private ServerSocket serverSocket;
@@ -18,33 +25,31 @@ public class DBServer {
     }
 
     public static void main(String[] args) throws IOException {
-        int masterPort = 12345;
-        int slavePort1 = 12346;
-        int slavePort2 = 12347;
+        ClusterConfig config = ConfigLoader.loadConfig();
 
-        new Thread(() -> {
-            try {
-                new DBServer(masterPort, true).start();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }).start();
+        for (ClusterNode nodeConfig : config.getNodes()) {
+            int port = nodeConfig.getPort();
+            boolean isMaster = nodeConfig.isMaster();
+            String dataPath = config.getDataPath();
 
-        new Thread(() -> {
-            try {
-                new DBServer(slavePort1, false).start();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }).start();
+            new Thread(() -> {
+                try {
+                    startNode(port, isMaster, config.getNodes(), dataPath);
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }).start();
+        }
+    }
 
-        new Thread(() -> {
-            try {
-                new DBServer(slavePort2, false).start();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }).start();
+    private static void startNode(int port, boolean isMaster, List<ClusterNode> nodes, String dataPath) throws IOException {
+        if (isMaster) {
+            MasterNode masterNode = new MasterNode(dataPath, nodes);
+            masterNode.start();
+        } else {
+            SlaveNode slaveNode = new SlaveNode(dataPath, port);
+            slaveNode.start();
+        }
     }
 
     public void start() throws IOException {

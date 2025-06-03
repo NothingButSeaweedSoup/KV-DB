@@ -12,7 +12,6 @@ public class SlaveNode extends LSMStorageEngine {
     public SlaveNode(String dataPath, int port) throws IOException {
         super(dataPath);
         this.serverSocket = new ServerSocket(port);
-        System.out.println("Slave node is running on port " + port);
     }
 
     public void start() throws IOException {
