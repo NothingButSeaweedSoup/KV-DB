@@ -1,79 +1,125 @@
 package cli;
 
-import cluster.ClusterConfig;
-import cluster.ClusterNode;
-import util.ConfigLoader;
+import core.LSMStorageEngine;
 
 import java.io.*;
-import java.net.Socket;
 import java.util.Scanner;
 
 public class CommandLineInterface {
-    private final String host;
-    private final int port;
+    private final LSMStorageEngine storageEngine;
     private final PrintStream out = new PrintStream(System.out, true, java.nio.charset.StandardCharsets.UTF_8);
 
-    public CommandLineInterface(String host, int port) {
-        this.host = host;
-        this.port = port;
+    public CommandLineInterface(String dataPath) throws IOException {
+        this.storageEngine = new LSMStorageEngine(dataPath);
     }
 
     public static void main(String[] args) throws IOException {
         PrintStream out = new PrintStream(System.out, true, java.nio.charset.StandardCharsets.UTF_8);
         try {
-            // 加载集群配置
-            ClusterConfig config = ConfigLoader.loadConfig();
-            // 获取主节点信息
-            ClusterNode masterNode = null;
-            for (ClusterNode node : config.getNodes()) {
-                if (node.isMaster()) {
-                    masterNode = node;
-                    break;
-                }
-            }
-            if (masterNode == null) {
-                out.println("未找到主节点配置。");
-                return;
-            }
-            CommandLineInterface cli = new CommandLineInterface(masterNode.getHost(), masterNode.getPort());
+            CommandLineInterface cli = new CommandLineInterface("data");
             cli.start();
         } catch (IOException e) {
-            out.println("初始化命令行界面失败: " + e.getMessage());
+            out.println("初始化存储引擎失败: " + e.getMessage());
         }
     }
 
     public void start() {
-        Socket socket = null;
-        try {
-            socket = new Socket(host, port);
-            Scanner scanner = new Scanner(System.in);
-            out.println("欢迎使用CLI工具，输入 'exit' 退出。");
+        Scanner scanner = new Scanner(System.in);
+        out.println("欢迎使用CLI工具，输入 'exit' 退出。");
 
-            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+        while (true) {
+            System.out.print(">>> ");
+            String input = scanner.nextLine().trim();
 
-            while (true) {
-                System.out.print(">>> ");
-                String input = scanner.nextLine().trim();
+            if ("exit".equalsIgnoreCase(input)) {
+                break;
+            }
 
-                if ("exit".equalsIgnoreCase(input)) {
+            String[] parts = input.split(" ", 2);
+            if (parts.length < 1) {
+                out.println("无效的命令。");
+                continue;
+            }
+
+            String command = parts[0].toLowerCase();
+            switch (command) {
+                case "put":
+                    if (parts.length < 2) {
+                        out.println("PUT命令需要键和值。");
+                        break;
+                    }
+                    String[] keyValue = parts[1].split(" ", 2);
+                    if (keyValue.length < 2) {
+                        out.println("PUT命令需要键和值。");
+                        break;
+                    }
+                    try {
+                        storageEngine.put(keyValue[0].getBytes(), keyValue[1]);
+                        out.println("插入或更新成功。");
+                    } catch (IOException e) {
+                        out.println("插入或更新失败: " + e.getMessage());
+                    }
                     break;
-                }
 
-                out.println(input);
-                String response = in.readLine();
-                System.out.println("Server response: " + response);
+                case "get":
+                    if (parts.length < 2) {
+                        out.println("GET命令需要键。");
+                        break;
+                    }
+                    try {
+                        Object value = storageEngine.get(parts[1].getBytes());
+                        if (value != null) {
+                            out.println("值: " + value);
+                        } else {
+                            out.println("键不存在。");
+                        }
+                    } catch (IOException | ClassNotFoundException e) {
+                        out.println("查询失败: " + e.getMessage());
+                    }
+                    break;
+
+                case "delete":
+                    if (parts.length < 2) {
+                        out.println("DELETE命令需要键。");
+                        break;
+                    }
+                    try {
+                        storageEngine.delete(parts[1].getBytes());
+                        out.println("删除成功。");
+                    } catch (IOException e) {
+                        out.println("删除失败: " + e.getMessage());
+                    }
+                    break;
+
+                case "flush":
+                    try {
+                        storageEngine.flush();
+                        out.println("数据已刷新到磁盘。");
+                    } catch (IOException e) {
+                        out.println("刷新数据失败: " + e.getMessage());
+                    }
+                    break;
+
+                case "help":
+                    out.println("支持的命令:");
+                    out.println("  put <key> <value>: 插入或更新键值对。");
+                    out.println("  get <key>: 查询键对应的值。");
+                    out.println("  delete <key>: 删除键对应的值。");
+                    out.println("  flush: 刷新数据到磁盘。");
+                    out.println("  help: 显示帮助信息。");
+                    out.println("  exit: 退出CLI工具。");
+                    break;
+
+                default:
+                    out.println("未知的命令。请输入 'help' 获取帮助。");
+                    break;
             }
+        }
+
+        try {
+            storageEngine.close();
         } catch (IOException e) {
-            out.println("连接到主节点失败: " + e.getMessage());
-        } finally {
-            if (socket != null) {
-                try {
-                    socket.close();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
+            out.println("关闭存储引擎失败: " + e.getMessage());
         }
         out.println("退出CLI工具。");
     }
