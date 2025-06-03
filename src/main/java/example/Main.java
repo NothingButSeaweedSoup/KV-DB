@@ -1,19 +1,12 @@
 package example;
 
-import core.LSMStorageEngine;
+import cli.CommandLineInterface;
 
-import java.io.*;
-import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
-import java.util.Map;
+import java.io.IOException;
 
 public class Main {
-    public static void main(String[] args) throws IOException, ClassNotFoundException {
-        String path = "data";
-        LSMStorageEngine lsmStorageEngine = new LSMStorageEngine(path);
-        for (int i = 0; i < 10000; i++){
-            lsmStorageEngine.put(("key" + i).getBytes(StandardCharsets.UTF_8), ("v" + i));
-        }
-        lsmStorageEngine.close();
+    public static void main(String[] args) throws IOException {
+        CommandLineInterface cli = new CommandLineInterface("data");
+        cli.start();
     }
 }

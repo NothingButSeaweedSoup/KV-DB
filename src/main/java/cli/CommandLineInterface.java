@@ -2,21 +2,19 @@ package cli;
 
 import core.LSMStorageEngine;
 
-import java.io.IOException;
-import java.io.PrintStream;
-import java.nio.charset.StandardCharsets;
+import java.io.*;
 import java.util.Scanner;
 
 public class CommandLineInterface {
     private final LSMStorageEngine storageEngine;
-    private final PrintStream out = new PrintStream(System.out, true, StandardCharsets.UTF_8);
+    private final PrintStream out = new PrintStream(System.out, true, java.nio.charset.StandardCharsets.UTF_8);
 
     public CommandLineInterface(String dataPath) throws IOException {
         this.storageEngine = new LSMStorageEngine(dataPath);
     }
 
-    public static void main(String[] args) {
-        PrintStream out = new PrintStream(System.out, true, StandardCharsets.UTF_8);
+    public static void main(String[] args) throws IOException {
+        PrintStream out = new PrintStream(System.out, true, java.nio.charset.StandardCharsets.UTF_8);
         try {
             CommandLineInterface cli = new CommandLineInterface("data");
             cli.start();

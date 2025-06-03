@@ -1,7 +1,6 @@
 package server;
 
 import core.LSMStorageEngine;
-
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -10,29 +9,54 @@ public class DBServer {
     private ServerSocket serverSocket;
     private int port;
     private LSMStorageEngine db;
+    private boolean isMaster;
 
-    public DBServer(int port) throws IOException {
+    public DBServer(int port, boolean isMaster) throws IOException {
         this.port = port;
-        db = new LSMStorageEngine("data");
+        this.isMaster = isMaster;
+        this.db = new LSMStorageEngine("data");
     }
 
     public static void main(String[] args) throws IOException {
-        int port = 12345; // 服务器监听的端口号
-        DBServer server = new DBServer(port);
-        server.start();
+        int masterPort = 12345;
+        int slavePort1 = 12346;
+        int slavePort2 = 12347;
+
+        new Thread(() -> {
+            try {
+                new DBServer(masterPort, true).start();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }).start();
+
+        new Thread(() -> {
+            try {
+                new DBServer(slavePort1, false).start();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }).start();
+
+        new Thread(() -> {
+            try {
+                new DBServer(slavePort2, false).start();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }).start();
     }
 
     public void start() throws IOException {
         serverSocket = new ServerSocket(port);
-        System.out.println("Server is running on port " + port);
+        System.out.println((isMaster ? "Master" : "Slave") + " server is running on port " + port);
 
         try {
             while (true) {
                 Socket clientSocket = serverSocket.accept();
-                System.out.println("Accepted connection from " + clientSocket);
+                System.out.println("Accepted connection from " + clientSocket.getInetAddress().getHostAddress());
 
-                Thread thread = new Thread(new ClientHandler(clientSocket));
-                thread.start();
+                new Thread(new ClientHandler(clientSocket, isMaster)).start();
             }
         } finally {
             serverSocket.close();
@@ -41,9 +65,11 @@ public class DBServer {
 
     private class ClientHandler implements Runnable {
         private Socket clientSocket;
+        private boolean isMaster;
 
-        public ClientHandler(Socket socket) {
+        public ClientHandler(Socket socket, boolean isMaster) {
             this.clientSocket = socket;
+            this.isMaster = isMaster;
         }
 
         @Override
@@ -53,50 +79,50 @@ public class DBServer {
 
                 String inputLine;
                 while ((inputLine = in.readLine()) != null) {
-                    // 解析客户端请求
-                    String[] parts = inputLine.split(" ", 3);
-                    String operation = parts[0].toLowerCase();
-                    String key = parts.length > 1 ? parts[1] : null;
-                    String value = parts.length > 2 ? parts[2] : null;
+                    if (isMaster) {
+                        // 主节点处理客户端请求
+                        String[] parts = inputLine.split(" ", 3);
+                        String operation = parts[0].toLowerCase();
+                        String key = parts.length > 1 ? parts[1] : null;
+                        String value = parts.length > 2 ? parts[2] : null;
 
-                    // 执行数据库操作
-                    switch (operation) {
-                        case "get":
-                            String result = "Usage: get <key>";
-                            if (key != null) {
-                                result = databaseGet(key);
-                            }
-                            out.println(result);
-                            break;
-                        case "put":
-                            if (key != null && value != null) {
-                                databasePut(key, value);
-                                out.println("OK");
-                            }else {
-                                out.println("Usage: put <key> <value>");
-                            }
-                            break;
-                        case "delete":
-                            if (key != null) {
-                                databaseDelete(key);
-                                out.println("OK");
-                            }else {
-                                out.println("Usage: delete <key>");
-                            }
-                            break;
-                        case "flush":
-                            databaseFlush();
-                            out.println("OK");
-                            break;
-                        case "exit":
-                            out.println("Server is shutting down.");
-                            break;
-                        case "help":
-                            out.println("Supported commands: get, put, delete, flush, exit, help");
-                            break;
-                        default:
-                            out.println("ERROR Unknown operation");
-                            break;
+                        switch (operation) {
+                            case "get":
+                                Object result = db.get(key.getBytes(StandardCharsets.UTF_8));
+                                out.println(result != null ? result.toString() : "null");
+                                break;
+                            case "put":
+                                if (key != null && value != null) {
+                                    db.put(key.getBytes(StandardCharsets.UTF_8), value);
+                                    out.println("OK");
+                                } else {
+                                    out.println("Usage: put <key> <value>");
+                                }
+                                break;
+                            case "delete":
+                                if (key != null) {
+                                    db.delete(key.getBytes(StandardCharsets.UTF_8));
+                                    out.println("OK");
+                                } else {
+                                    out.println("Usage: delete <key>");
+                                }
+                                break;
+                            case "exit":
+                                out.println("Server is shutting down.");
+                                break;
+                            default:
+                                out.println("ERROR Unknown operation");
+                                break;
+                        }
+                    } else {
+                        // 从节点处理主节点同步的数据
+                        byte[] data = inputLine.getBytes(StandardCharsets.UTF_8);
+                        try (ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(data))) {
+                            Object value = ois.readObject();
+                            db.put("received_key".getBytes(StandardCharsets.UTF_8), value);
+                        } catch (ClassNotFoundException e) {
+                            e.printStackTrace();
+                        }
                     }
                 }
             } catch (IOException | ClassNotFoundException e) {
@@ -108,23 +134,6 @@ public class DBServer {
                     e.printStackTrace();
                 }
             }
-        }
-
-        private String databaseGet(String key) throws IOException, ClassNotFoundException {
-            Object result = db.get(key.getBytes(StandardCharsets.UTF_8));
-            return result != null ? result.toString() : "null";
-        }
-
-        private void databasePut(String key, String value) throws IOException {
-            db.put(key.getBytes(StandardCharsets.UTF_8), value);
-        }
-
-        private void databaseDelete(String key) throws IOException {
-            db.delete(key.getBytes(StandardCharsets.UTF_8));
-        }
-
-        private void databaseFlush() throws IOException {
-            db.flush();
         }
     }
 }

@@ -33,8 +33,8 @@ public class DBClient {
                     String response = in.readLine();
                     System.out.println("Server response: " + response);
 
-                    if ("Server is shutting down.".equals(response)) {
-                        System.out.println("Connection closed by server.");
+                    if ("exit".equalsIgnoreCase(inputLine)) {
+                        System.out.println("Connection closed.");
                         break;
                     }
                 }
