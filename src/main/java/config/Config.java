@@ -25,8 +25,8 @@ public class Config {
 
     public static class Builder {
         private String dataDir;
-        private long walSegmentSize = 256 * 1024;
-        private long memTableThreshold = 1024 * 1024;
+        private long walSegmentSize = 1 * 1024 * 1024;
+        private long memTableThreshold = 4 * 1024 * 1024;
 
         public Builder setDataDir(String dataDir) {
             this.dataDir = dataDir;

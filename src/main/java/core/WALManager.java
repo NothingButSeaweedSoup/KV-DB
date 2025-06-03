@@ -172,8 +172,7 @@ public class WALManager {
     }
 
     private void compactWAL(File walFile) throws IOException {
-//        Map<byte[], WALEntry> operations = new TreeMap<>();
-        TreeMap<byte[], WALEntry> operations = new TreeMap<>(ByteUtil::compare);
+        Map<byte[], WALEntry> operations = new HashMap<>();
         try (FileChannel channel = FileChannel.open(walFile.toPath(), StandardOpenOption.READ)) {
             ByteBuffer buffer = ByteBuffer.allocate(1024);
             long position = 0;
