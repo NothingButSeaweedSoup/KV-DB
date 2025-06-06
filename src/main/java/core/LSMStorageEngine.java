@@ -64,7 +64,7 @@ public class LSMStorageEngine implements StorageEngine {
         lock.readLock().lock();
         try {
             byte[] value = memTable.get(key);
-            if (value != null && value != Constants.Tombstone.TOMBSTONE) {
+            if (value == Constants.Tombstone.TOMBSTONE) {
                 return deserializeObject(value);
             }
             value = findInSSTable(key);
