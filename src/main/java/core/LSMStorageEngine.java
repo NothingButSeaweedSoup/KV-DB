@@ -3,6 +3,7 @@ package core;
 import api.StorageEngine;
 import config.Config;
 import util.ByteUtil;
+import util.DBConfigLoader;
 
 import java.io.*;
 import java.util.Arrays;
@@ -19,10 +20,14 @@ public class LSMStorageEngine implements StorageEngine {
     private WALManager wal;
     private SSTable sstable;
     private Compaction compaction;
+    private DBConfigLoader dbConfigLoader;
 
     public LSMStorageEngine(String path) throws IOException {
+        dbConfigLoader = new DBConfigLoader();
         this.config = new Config.Builder()
                 .setDataDir(path)
+                .setWalSegmentSize(dbConfigLoader.getWalSegmentSize())
+                .setMemTableThreshold(dbConfigLoader.getMemTableThreshold())
                 .build();
         init();
     }

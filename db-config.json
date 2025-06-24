@@ -1,0 +1,4 @@
+{
+  "walSegmentSize": 10485760,
+  "memTableThreshold": 4194304
+}
