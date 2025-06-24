@@ -70,6 +70,8 @@ public class LSMStorageEngine implements StorageEngine {
         try {
             byte[] value = memTable.get(key);
             if (value == Constants.Tombstone.TOMBSTONE) {
+                return null;
+            }else if(value != null){
                 return deserializeObject(value);
             }
             value = findInSSTable(key);

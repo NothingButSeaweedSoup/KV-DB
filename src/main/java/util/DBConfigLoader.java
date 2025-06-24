@@ -12,9 +12,15 @@ public class DBConfigLoader {
     // 从配置文件中加载数据库配置
     public DBConfigLoader() throws IOException {
         ObjectMapper objectMapper = new ObjectMapper();
-        var jsonNode = objectMapper.readTree(new File(DB_CONFIG_FILE_PATH));
-        this.walSegmentSize = jsonNode.get("walSegmentSize").asLong();
-        this.memTableThreshold = jsonNode.get("memTableThreshold").asLong();
+        // 判断配置文件是否存在
+        if (new File(DB_CONFIG_FILE_PATH).exists()) {
+            var jsonNode = objectMapper.readTree(new File(DB_CONFIG_FILE_PATH));
+            this.walSegmentSize = jsonNode.get("walSegmentSize").asLong();
+            this.memTableThreshold = jsonNode.get("memTableThreshold").asLong();
+        }else{
+            this.walSegmentSize = 1024 * 1024;
+            this.memTableThreshold =4 * 1024 * 1024;
+        }
     }
 
     public long getWalSegmentSize() {
