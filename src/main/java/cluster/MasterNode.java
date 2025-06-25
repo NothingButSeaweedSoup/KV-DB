@@ -6,15 +6,63 @@ import util.ByteUtil;
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class MasterNode extends LSMStorageEngine {
     private ClusterManager clusterManager;
     private ServerSocket serverSocket;
 
+    // 批量同步队列
+    private List<byte[]> batch = new ArrayList<>();
+    // 批量大小配置
+    private final int batchSize = 100;
+    // 定时任务调度器
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+
     public MasterNode(String dataPath, List<ClusterNode> nodes) throws IOException {
         super(dataPath);
         this.clusterManager = new ClusterManager(nodes);
+        // 每秒检查一次是否需要同步
+        scheduler.scheduleAtFixedRate(this::syncBatch, 1, 1, TimeUnit.SECONDS);
+    }
+
+    @Override
+    public void put(byte[] key, Object value) throws IOException {
+        super.put(key, value);
+        byte[] data = serializeData(key, value);
+        batch.add(data);
+        if (batch.size() >= batchSize) {
+            syncBatch();
+        }
+    }
+
+    @Override
+    public void delete(byte[] key) throws IOException {
+        super.delete(key);
+        byte[] data = serializeData(key, null);
+        batch.add(data);
+        if (batch.size() >= batchSize) {
+            syncBatch();
+        }
+    }
+
+    private byte[] serializeData(byte[] key, Object value) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ObjectOutputStream oos = new ObjectOutputStream(baos)) {
+            oos.writeObject(value);
+        }
+        return baos.toByteArray();
+    }
+
+    private void syncBatch() {
+        if (!batch.isEmpty()) {
+            clusterManager.syncData(batch);
+            batch.clear();
+        }
     }
 
     public void start() throws IOException {
@@ -32,21 +80,6 @@ public class MasterNode extends LSMStorageEngine {
         } finally {
             serverSocket.close();
         }
-    }
-
-    @Override
-    public void put(byte[] key, Object value) throws IOException {
-        super.put(key, value);
-        byte[] data = serializeData(key, value);
-        clusterManager.syncData(data);
-    }
-
-    private byte[] serializeData(byte[] key, Object value) throws IOException {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ObjectOutputStream oos = new ObjectOutputStream(baos)) {
-            oos.writeObject(value);
-        }
-        return baos.toByteArray();
     }
 
     private class ClientHandler implements Runnable {
