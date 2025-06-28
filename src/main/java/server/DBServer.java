@@ -34,7 +34,7 @@ public class DBServer {
 
             new Thread(() -> {
                 try {
-                    startNode(port, isMaster, config.getNodes(), dataPath);
+                    startNode(port, isMaster, config.getNodes(), dataPath, config);
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
@@ -42,12 +42,12 @@ public class DBServer {
         }
     }
 
-    private static void startNode(int port, boolean isMaster, List<ClusterNode> nodes, String dataPath) throws IOException {
+    private static void startNode(int port, boolean isMaster, List<ClusterNode> nodes, String dataPath, ClusterConfig config) throws IOException {
         if (isMaster) {
             MasterNode masterNode = new MasterNode(dataPath, nodes);
             masterNode.start();
         } else {
-            SlaveNode slaveNode = new SlaveNode(dataPath, port);
+            SlaveNode slaveNode = new SlaveNode(dataPath, port, config);
             slaveNode.start();
         }
     }

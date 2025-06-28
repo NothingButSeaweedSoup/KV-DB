@@ -1,20 +1,28 @@
 package cluster;
 
 import core.LSMStorageEngine;
+import core.Constants;
+import core.WALManager; // 引入 WALManager
 
 import java.io.*;
-import java.net.ServerSocket;
-import java.net.Socket;
+import java.net.*;
+import java.util.ArrayList;
+import java.util.List;
 
 public class SlaveNode extends LSMStorageEngine {
     private ServerSocket serverSocket;
+    private ClusterConfig config; // 用于获取主节点信息
 
-    public SlaveNode(String dataPath, int port) throws IOException {
+    public SlaveNode(String dataPath, int port, ClusterConfig config) throws IOException {
         super(dataPath);
         this.serverSocket = new ServerSocket(port);
+        this.config = config; // 保存配置信息
     }
 
     public void start() throws IOException {
+        // 启动一个新线程用于处理 WAL 恢复
+        new Thread(this::recoverFromWAL).start();
+
         try {
             while (true) {
                 Socket socket = serverSocket.accept();
@@ -22,6 +30,64 @@ public class SlaveNode extends LSMStorageEngine {
             }
         } finally {
             serverSocket.close();
+        }
+    }
+
+    // 在 SlaveNode 中新增 recoverFromWAL 方法
+    private void recoverFromWAL() {
+        while (true) {
+            try {
+                // 假设主节点的WAL文件路径是已知的
+                String walFilePath = getMasterWALFilePath();
+                List<WALManager.WALEntry> walEntries = fetchWALEntries(walFilePath);
+                replayWALEntries(walEntries); // 重放WAL日志
+                Thread.sleep(1000); // 每秒拉取一次
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private String getMasterWALFilePath() {
+        // 从配置文件中获取主节点的WAL文件路径
+        return config.getDataPath() + Constants.File.WAL_EXTENSION;
+    }
+
+    // 在 SlaveNode 中新增 fetchWALEntries 方法
+    private List<WALManager.WALEntry> fetchWALEntries(String walFilePath) throws IOException {
+        List<WALManager.WALEntry> entries = new ArrayList<>();
+        File walFile = new File(walFilePath);
+        if (!walFile.exists()) {
+            return entries; // 如果WAL文件不存在，返回空列表
+        }
+
+        try (FileInputStream fis = new FileInputStream(walFile);
+             ObjectInputStream ois = new ObjectInputStream(fis)) {
+            while (true) {
+                try {
+                    WALManager.WALEntry entry = (WALManager.WALEntry) ois.readObject();
+                    entries.add(entry);
+                } catch (ClassNotFoundException | EOFException e) {
+                    break; // 结束读取
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return entries;
+    }
+
+    // 在 SlaveNode 中新增 replayWALEntries 方法
+    private void replayWALEntries(List<WALManager.WALEntry> entries) throws IOException {
+        for (WALManager.WALEntry entry : entries) {
+            switch (entry.getOperation()) {
+                case Constants.Operation.PUT:
+                    put(entry.getKey(), entry.getValue());
+                    break;
+                case Constants.Operation.DELETE:
+                    delete(entry.getKey());
+                    break;
+            }
         }
     }
 

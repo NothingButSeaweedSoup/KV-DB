@@ -1,11 +1,11 @@
 package cluster;
 
 import core.LSMStorageEngine;
-import util.ByteUtil;
+import core.Constants;
+import core.WALManager; // 引入 WALManager
 
 import java.io.*;
-import java.net.ServerSocket;
-import java.net.Socket;
+import java.net.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executors;
@@ -15,6 +15,7 @@ import java.util.concurrent.TimeUnit;
 public class MasterNode extends LSMStorageEngine {
     private ClusterManager clusterManager;
     private ServerSocket serverSocket;
+    private WALManager walManager; // 引入 WALManager
 
     // 批量同步队列
     private List<byte[]> batch = new ArrayList<>();
@@ -26,6 +27,7 @@ public class MasterNode extends LSMStorageEngine {
     public MasterNode(String dataPath, List<ClusterNode> nodes) throws IOException {
         super(dataPath);
         this.clusterManager = new ClusterManager(nodes);
+        this.walManager = new WALManager(dataPath, 1024 * 1024); // 假设段大小为1MB
         // 每秒检查一次是否需要同步
         scheduler.scheduleAtFixedRate(this::syncBatch, 1, 1, TimeUnit.SECONDS);
     }
@@ -134,8 +136,8 @@ public class MasterNode extends LSMStorageEngine {
                         case "exit":
                             out.println("Server is shutting down.");
                             break;
-                        case "help":
-                            out.println("Supported commands: get, put, delete, flush, exit, help");
+                        case "wal_recover": // 新增 WAL 恢复请求处理
+                            handleWALRecoverRequest(clientSocket);
                             break;
                         default:
                             out.println("ERROR Unknown operation");
@@ -149,6 +151,29 @@ public class MasterNode extends LSMStorageEngine {
                     clientSocket.close();
                 } catch (IOException e) {
                     e.printStackTrace();
+                }
+            }
+        }
+
+        private void handleWALRecoverRequest(Socket socket) throws IOException {
+            // 获取WAL文件路径
+            String walFilePath = walManager.getWalPath();
+            File walFile = new File(walFilePath);
+
+            if (!walFile.exists()) {
+                // 如果WAL文件不存在，发送空响应
+                try (PrintWriter out = new PrintWriter(socket.getOutputStream(), true)) {
+                    out.println("WAL file not found");
+                }
+                return;
+            }
+
+            // 发送WAL文件内容
+            try (FileInputStream fis = new FileInputStream(walFile)) {
+                byte[] buffer = new byte[8192];
+                int bytesRead;
+                while ((bytesRead = fis.read(buffer)) != -1) {
+                    socket.getOutputStream().write(buffer, 0, bytesRead);
                 }
             }
         }

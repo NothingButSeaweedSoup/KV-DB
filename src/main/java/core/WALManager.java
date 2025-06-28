@@ -280,11 +280,15 @@ public class WALManager {
         }
     }
 
+    public String getWalPath() {
+        return walPath;
+    }
+
     public interface RecoveryCallback {
         void recoveryEntry(byte operation, byte[] key, byte[] value) throws IOException;
     }
 
-    private class WALEntry {
+    public class WALEntry {
         private static final int LOG_ENTRY_SIZE = 1 + 4 + 4;
 
         private final byte operation;
@@ -323,6 +327,18 @@ public class WALManager {
                     + "keyLength=" + key.length + ", "
                     + "valueLength=" + (value != null ? value.length : 0) + ", "
                     + "}";
+        }
+
+        public byte getOperation() {
+            return operation;
+        }
+
+        public byte[] getKey() {
+            return key;
+        }
+
+        public byte[] getValue() {
+            return value;
         }
     }
 }
