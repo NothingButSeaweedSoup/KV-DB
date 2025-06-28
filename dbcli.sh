@@ -1,6 +1,6 @@
 #!/bin/bash
 
-JAVA_CLASSPATH="target/classes"
+JAVA_CLASSPATH="target/classes;target/dependency/*"
 JAVA_MAIN_CLASS="cli.CommandLineInterface"
 DATA_PATH="data"
 
