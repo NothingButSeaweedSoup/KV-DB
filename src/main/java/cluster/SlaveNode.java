@@ -12,11 +12,15 @@ import java.util.List;
 public class SlaveNode extends LSMStorageEngine {
     private ServerSocket serverSocket;
     private ClusterConfig config; // 用于获取主节点信息
+    private final File replicationOffsetFile;
+    private volatile long lastAppliedSeq;
 
     public SlaveNode(String dataPath, int port, ClusterConfig config) throws IOException {
         super(dataPath);
         this.serverSocket = new ServerSocket(port);
         this.config = config; // 保存配置信息
+        this.replicationOffsetFile = new File(dataPath, "replication.offset");
+        this.lastAppliedSeq = loadLastAppliedSeq();
     }
 
     public void start() throws IOException {
@@ -91,6 +95,39 @@ public class SlaveNode extends LSMStorageEngine {
         }
     }
 
+    private long loadLastAppliedSeq() {
+        if (!replicationOffsetFile.exists()) {
+            return 0L;
+        }
+        try (DataInputStream in = new DataInputStream(new FileInputStream(replicationOffsetFile))) {
+            return in.readLong();
+        } catch (IOException e) {
+            e.printStackTrace();
+            return 0L;
+        }
+    }
+
+    private void persistLastAppliedSeq(long seq) {
+        try (DataOutputStream out = new DataOutputStream(new FileOutputStream(replicationOffsetFile))) {
+            out.writeLong(seq);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void applyReplicationMessage(ReplicationMessage msg) throws IOException {
+        long seq = msg.getSeq();
+        if (seq <= lastAppliedSeq) {
+            return;
+        }
+        switch (msg.getOp()) {
+            case PUT -> put(msg.getKey(), msg.getValue());
+            case DELETE -> delete(msg.getKey());
+        }
+        lastAppliedSeq = seq;
+        persistLastAppliedSeq(seq);
+    }
+
     private class ClientHandler implements Runnable {
         private Socket clientSocket;
 
@@ -110,9 +147,10 @@ public class SlaveNode extends LSMStorageEngine {
                     byte[] data = readBytes(in, dataLength);
                     // 处理接收到的数据
                     try (ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(data))) {
-                        Object value = ois.readObject();
-                        // 更新本地存储
-                        put("received_key".getBytes(), value);
+                        Object obj = ois.readObject();
+                        if (obj instanceof ReplicationMessage msg) {
+                            applyReplicationMessage(msg);
+                        }
                     } catch (ClassNotFoundException e) {
                         e.printStackTrace();
                     }

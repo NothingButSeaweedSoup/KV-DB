@@ -1,13 +1,13 @@
 package cluster;
 
 import core.LSMStorageEngine;
-import core.Constants;
 import core.WALManager; // 引入 WALManager
 
 import java.io.*;
 import java.net.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -23,6 +23,7 @@ public class MasterNode extends LSMStorageEngine {
     private final int batchSize = 100;
     // 定时任务调度器
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private final AtomicLong replicationSeq = new AtomicLong(0);
 
     public MasterNode(String dataPath, List<ClusterNode> nodes) throws IOException {
         super(dataPath);
@@ -35,7 +36,7 @@ public class MasterNode extends LSMStorageEngine {
     @Override
     public void put(byte[] key, Object value) throws IOException {
         super.put(key, value);
-        byte[] data = serializeData(key, value);
+        byte[] data = serializeData(ReplicationMessage.Operation.PUT, key, value);
         batch.add(data);
         if (batch.size() >= batchSize) {
             syncBatch();
@@ -45,17 +46,19 @@ public class MasterNode extends LSMStorageEngine {
     @Override
     public void delete(byte[] key) throws IOException {
         super.delete(key);
-        byte[] data = serializeData(key, null);
+        byte[] data = serializeData(ReplicationMessage.Operation.DELETE, key, null);
         batch.add(data);
         if (batch.size() >= batchSize) {
             syncBatch();
         }
     }
 
-    private byte[] serializeData(byte[] key, Object value) throws IOException {
+    private byte[] serializeData(ReplicationMessage.Operation op, byte[] key, Object value) throws IOException {
+        long seq = replicationSeq.incrementAndGet();
+        ReplicationMessage msg = new ReplicationMessage(seq, op, key, value);
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         try (ObjectOutputStream oos = new ObjectOutputStream(baos)) {
-            oos.writeObject(value);
+            oos.writeObject(msg);
         }
         return baos.toByteArray();
     }
