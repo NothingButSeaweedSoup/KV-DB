@@ -1,0 +1,19 @@
+{
+  "nodeId": "node1",
+  "raftGroupId": "02511d47-d67c-49a3-9011-abb3109a44c1",
+  "dataDir": "data/raft",
+  "peers": [
+    {"id": "node1", "address": "192.168.1.101:9001"},
+    {"id": "node2", "address": "192.168.1.102:9001"},
+    {"id": "node3", "address": "192.168.1.103:9001"}
+  ],
+  "raft": {
+    "rpcPort": 9001,
+    "heartbeatIntervalMs": 100,
+    "electionTimeoutMinMs": 200,
+    "electionTimeoutMaxMs": 400,
+    "snapshotAutoTriggerEnabled": true,
+    "snapshotAutoTriggerThreshold": 100000,
+    "logSegmentSizeMax": 33554432
+  }
+}
