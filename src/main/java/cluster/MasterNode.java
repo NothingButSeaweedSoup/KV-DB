@@ -1,24 +1,27 @@
 package cluster;
 
 import core.LSMStorageEngine;
-import core.WALManager; // 引入 WALManager
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.net.*;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 public class MasterNode extends LSMStorageEngine {
-    private ClusterManager clusterManager;
-    private ServerSocket serverSocket;
-    private WALManager walManager; // 引入 WALManager
 
-    // 批量同步队列
-    private List<byte[]> batch = new ArrayList<>();
+    private static final Logger log = LoggerFactory.getLogger(MasterNode.class);
+
+    private final ClusterManager clusterManager;
+    private ServerSocket serverSocket;
+
+    // 批量同步队列（线程安全）
+    private final List<byte[]> batch = new CopyOnWriteArrayList<>();
     // 批量大小配置
     private final int batchSize = 100;
     // 定时任务调度器
@@ -28,7 +31,6 @@ public class MasterNode extends LSMStorageEngine {
     public MasterNode(String dataPath, List<ClusterNode> nodes) throws IOException {
         super(dataPath);
         this.clusterManager = new ClusterManager(nodes);
-        this.walManager = new WALManager(dataPath, 1024 * 1024); // 假设段大小为1MB
         // 每秒检查一次是否需要同步
         scheduler.scheduleAtFixedRate(this::syncBatch, 1, 1, TimeUnit.SECONDS);
     }
@@ -63,21 +65,30 @@ public class MasterNode extends LSMStorageEngine {
         return baos.toByteArray();
     }
 
-    private void syncBatch() {
+    private synchronized void syncBatch() {
         if (!batch.isEmpty()) {
-            clusterManager.syncData(batch);
+            // 拷贝当前批次并清空，避免集群同步期间阻塞写入
+            List<byte[]> snapshot = List.copyOf(batch);
             batch.clear();
+            clusterManager.syncData(snapshot);
         }
+    }
+
+    @Override
+    public void close() throws IOException {
+        scheduler.shutdown();
+        syncBatch();
+        super.close();
     }
 
     public void start() throws IOException {
         serverSocket = new ServerSocket(12345);
-        System.out.println("Master node is running on port 12345");
+        log.info("Master node is running on port 12345");
 
         try {
             while (true) {
                 Socket clientSocket = serverSocket.accept();
-                System.out.println("Accepted connection from " + clientSocket.getInetAddress().getHostAddress());
+                log.info("Accepted connection from {}", clientSocket.getInetAddress().getHostAddress());
 
                 // 处理客户端请求
                 new Thread(new ClientHandler(clientSocket)).start();
@@ -139,52 +150,27 @@ public class MasterNode extends LSMStorageEngine {
                         case "exit":
                             out.println("Server is shutting down.");
                             break;
-                        case "wal_recover": // 新增 WAL 恢复请求处理
-                            handleWALRecoverRequest(clientSocket);
-                            break;
                         default:
                             out.println("ERROR Unknown operation");
                             break;
                     }
                 }
-            } catch (IOException | ClassNotFoundException e) {
-                e.printStackTrace();
+            } catch (IOException e) {
+                log.error("处理客户端请求异常", e);
             } finally {
                 try {
                     clientSocket.close();
                 } catch (IOException e) {
-                    e.printStackTrace();
+                    log.warn("关闭客户端连接失败", e);
                 }
             }
         }
 
-        private void handleWALRecoverRequest(Socket socket) throws IOException {
-            // 获取WAL文件路径
-            String walFilePath = walManager.getWalPath();
-            File walFile = new File(walFilePath);
-
-            if (!walFile.exists()) {
-                // 如果WAL文件不存在，发送空响应
-                try (PrintWriter out = new PrintWriter(socket.getOutputStream(), true)) {
-                    out.println("WAL file not found");
-                }
-                return;
-            }
-
-            // 发送WAL文件内容
-            try (FileInputStream fis = new FileInputStream(walFile)) {
-                byte[] buffer = new byte[8192];
-                int bytesRead;
-                while ((bytesRead = fis.read(buffer)) != -1) {
-                    socket.getOutputStream().write(buffer, 0, bytesRead);
-                }
-            }
-        }
-
-        private String databaseGet(String key) throws IOException, ClassNotFoundException {
+        private String databaseGet(String key) throws IOException {
             Object result = get(key.getBytes());
             return result != null ? result.toString() : "null";
         }
+
 
         private void databasePut(String key, String value) throws IOException {
             put(key.getBytes(), value);

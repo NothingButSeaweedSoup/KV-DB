@@ -5,6 +5,8 @@ import cluster.ClusterNode;
 import cluster.MasterNode;
 import cluster.SlaveNode;
 import core.LSMStorageEngine;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import util.ConfigLoader;
 
 import java.io.*;
@@ -13,6 +15,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 public class DBServer {
+
+    private static final Logger log = LoggerFactory.getLogger(DBServer.class);
+
     private ServerSocket serverSocket;
     private int port;
     private LSMStorageEngine db;
@@ -36,7 +41,7 @@ public class DBServer {
                 try {
                     startNode(port, isMaster, config.getNodes(), dataPath, config);
                 } catch (IOException e) {
-                    e.printStackTrace();
+                    log.error("启动节点失败", e);
                 }
             }).start();
         }
@@ -54,12 +59,12 @@ public class DBServer {
 
     public void start() throws IOException {
         serverSocket = new ServerSocket(port);
-        System.out.println((isMaster ? "Master" : "Slave") + " server is running on port " + port);
+        log.info("{} server is running on port {}", isMaster ? "Master" : "Slave", port);
 
         try {
             while (true) {
                 Socket clientSocket = serverSocket.accept();
-                System.out.println("Accepted connection from " + clientSocket.getInetAddress().getHostAddress());
+                log.info("Accepted connection from {}", clientSocket.getInetAddress().getHostAddress());
 
                 new Thread(new ClientHandler(clientSocket, isMaster)).start();
             }
@@ -126,17 +131,17 @@ public class DBServer {
                             Object value = ois.readObject();
                             db.put("received_key".getBytes(StandardCharsets.UTF_8), value);
                         } catch (ClassNotFoundException e) {
-                            e.printStackTrace();
+                            log.error("反序列化数据失败", e);
                         }
                     }
                 }
-            } catch (IOException | ClassNotFoundException e) {
-                e.printStackTrace();
+            } catch (IOException e) {
+                log.error("处理客户端请求异常", e);
             } finally {
                 try {
                     clientSocket.close();
                 } catch (IOException e) {
-                    e.printStackTrace();
+                    log.warn("关闭客户端连接失败", e);
                 }
             }
         }

@@ -1,97 +1,37 @@
 package cluster;
 
 import core.LSMStorageEngine;
-import core.Constants;
-import core.WALManager; // 引入 WALManager
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.net.*;
-import java.util.ArrayList;
-import java.util.List;
 
 public class SlaveNode extends LSMStorageEngine {
-    private ServerSocket serverSocket;
-    private ClusterConfig config; // 用于获取主节点信息
+
+    private static final Logger log = LoggerFactory.getLogger(SlaveNode.class);
+
+    private final ServerSocket serverSocket;
     private final File replicationOffsetFile;
     private volatile long lastAppliedSeq;
 
     public SlaveNode(String dataPath, int port, ClusterConfig config) throws IOException {
         super(dataPath);
         this.serverSocket = new ServerSocket(port);
-        this.config = config; // 保存配置信息
         this.replicationOffsetFile = new File(dataPath, "replication.offset");
         this.lastAppliedSeq = loadLastAppliedSeq();
     }
 
     public void start() throws IOException {
-        // 启动一个新线程用于处理 WAL 恢复
-        new Thread(this::recoverFromWAL).start();
-
+        log.info("从节点启动，监听端口 {}", serverSocket.getLocalPort());
         try {
             while (true) {
                 Socket socket = serverSocket.accept();
+                log.info("接受来自 {} 的连接", socket.getInetAddress().getHostAddress());
                 new Thread(new ClientHandler(socket)).start();
             }
         } finally {
             serverSocket.close();
-        }
-    }
-
-    // 在 SlaveNode 中新增 recoverFromWAL 方法
-    private void recoverFromWAL() {
-        while (true) {
-            try {
-                // 假设主节点的WAL文件路径是已知的
-                String walFilePath = getMasterWALFilePath();
-                List<WALManager.WALEntry> walEntries = fetchWALEntries(walFilePath);
-                replayWALEntries(walEntries); // 重放WAL日志
-                Thread.sleep(1000); // 每秒拉取一次
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }
-    }
-
-    private String getMasterWALFilePath() {
-        // 从配置文件中获取主节点的WAL文件路径
-        return config.getDataPath() + Constants.File.WAL_EXTENSION;
-    }
-
-    // 在 SlaveNode 中新增 fetchWALEntries 方法
-    private List<WALManager.WALEntry> fetchWALEntries(String walFilePath) throws IOException {
-        List<WALManager.WALEntry> entries = new ArrayList<>();
-        File walFile = new File(walFilePath);
-        if (!walFile.exists()) {
-            return entries; // 如果WAL文件不存在，返回空列表
-        }
-
-        try (FileInputStream fis = new FileInputStream(walFile);
-             ObjectInputStream ois = new ObjectInputStream(fis)) {
-            while (true) {
-                try {
-                    WALManager.WALEntry entry = (WALManager.WALEntry) ois.readObject();
-                    entries.add(entry);
-                } catch (ClassNotFoundException | EOFException e) {
-                    break; // 结束读取
-                }
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        return entries;
-    }
-
-    // 在 SlaveNode 中新增 replayWALEntries 方法
-    private void replayWALEntries(List<WALManager.WALEntry> entries) throws IOException {
-        for (WALManager.WALEntry entry : entries) {
-            switch (entry.getOperation()) {
-                case Constants.Operation.PUT:
-                    put(entry.getKey(), entry.getValue());
-                    break;
-                case Constants.Operation.DELETE:
-                    delete(entry.getKey());
-                    break;
-            }
         }
     }
 
@@ -102,7 +42,7 @@ public class SlaveNode extends LSMStorageEngine {
         try (DataInputStream in = new DataInputStream(new FileInputStream(replicationOffsetFile))) {
             return in.readLong();
         } catch (IOException e) {
-            e.printStackTrace();
+            log.error("读取复制偏移量失败", e);
             return 0L;
         }
     }
@@ -111,7 +51,7 @@ public class SlaveNode extends LSMStorageEngine {
         try (DataOutputStream out = new DataOutputStream(new FileOutputStream(replicationOffsetFile))) {
             out.writeLong(seq);
         } catch (IOException e) {
-            e.printStackTrace();
+            log.error("持久化复制偏移量失败", e);
         }
     }
 
@@ -152,16 +92,16 @@ public class SlaveNode extends LSMStorageEngine {
                             applyReplicationMessage(msg);
                         }
                     } catch (ClassNotFoundException e) {
-                        e.printStackTrace();
+                        log.error("反序列化复制消息失败", e);
                     }
                 }
             } catch (IOException e) {
-                e.printStackTrace();
+                log.error("处理从节点客户端请求异常", e);
             } finally {
                 try {
                     clientSocket.close();
                 } catch (IOException e) {
-                    e.printStackTrace();
+                    log.warn("关闭客户端连接失败", e);
                 }
             }
         }
