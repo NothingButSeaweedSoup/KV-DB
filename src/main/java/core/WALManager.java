@@ -16,10 +16,16 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.zip.CRC32;
 
 public class WALManager {
 
     private static final Logger log = LoggerFactory.getLogger(WALManager.class);
+
+    /** WAL 文件版本魔数: 0x4B564442 ("KVDB") */
+    private static final int WAL_MAGIC = 0x4B564442;
+    /** WAL 文件头大小（魔数 4 字节） */
+    private static final int WAL_HEADER_SIZE = 4;
 
     /** BATCH模式默认每多少条记录触发一次fsync */
     private static final int DEFAULT_BATCH_INTERVAL = 100;
@@ -89,9 +95,23 @@ public class WALManager {
 
     public void init(RecoveryCallback callback) throws IOException {
         File walFile = new File(walPath);
-        if (walFile.exists()) {
+        if (walFile.exists() && walFile.length() > 0) {
             try (FileChannel channel = FileChannel.open(walFile.toPath(), StandardOpenOption.READ)) {
-                recover(channel, callback);
+                // 检测 WAL 格式版本
+                ByteBuffer magicBuf = ByteBuffer.allocate(WAL_HEADER_SIZE);
+                int bytesRead = channel.read(magicBuf);
+                if (bytesRead == WAL_HEADER_SIZE) {
+                    magicBuf.flip();
+                    int magic = magicBuf.getInt();
+                    if (magic == WAL_MAGIC) {
+                        // 新格式：带 CRC32
+                        recover(channel, callback, WAL_HEADER_SIZE);
+                    } else {
+                        // 旧格式：无 CRC32，回退到文件开头
+                        log.info("检测到旧格式WAL文件，使用兼容模式恢复");
+                        recoverLegacy(channel, callback);
+                    }
+                }
             }
         }
         openWAL();
@@ -155,6 +175,7 @@ public class WALManager {
 
     private void openWAL() throws IOException {
         File walFile = new File(walPath);
+        boolean isNew = !walFile.exists() || walFile.length() == 0;
 
         channel = FileChannel.open(
                 walFile.toPath(),
@@ -163,10 +184,15 @@ public class WALManager {
                 StandardOpenOption.CREATE
         );
 
-        if (walFile.exists()) {
-            currentSize = channel.size();
+        if (isNew) {
+            // 新文件写入版本魔数头
+            ByteBuffer header = ByteBuffer.allocate(WAL_HEADER_SIZE);
+            header.putInt(WAL_MAGIC);
+            header.flip();
+            channel.write(header);
+            currentSize = WAL_HEADER_SIZE;
         } else {
-            currentSize = 0;
+            currentSize = channel.size();
         }
     }
 
@@ -175,7 +201,106 @@ public class WALManager {
      * @param callback
      * @throws IOException 按照格式，从WAL日志文件中读取操作类型、key长度、key值、value长度和value值，并调用回调函数处理每个日志条目
      */
-    private void recover(FileChannel channel, RecoveryCallback callback) throws IOException {
+    /**
+     * 恢复新格式 WAL（带 CRC32 校验）。
+     */
+    private void recover(FileChannel channel, RecoveryCallback callback, long startPosition) throws IOException {
+        ByteBuffer buffer = ByteBuffer.allocate(1024);
+        long position = startPosition;
+        long fileSize = channel.size();
+
+        while (position < fileSize) {
+            channel.position(position);
+
+            // 读取 CRC32 (4 bytes)
+            buffer.clear().limit(4);
+            int bytesRead = channel.read(buffer);
+            if (bytesRead != 4) {
+                break;
+            }
+            buffer.flip();
+            int storedCrc = buffer.getInt();
+
+            // 读取 operation (1 byte)
+            buffer.clear().limit(1);
+            bytesRead = channel.read(buffer);
+            if (bytesRead != 1) {
+                break;
+            }
+            buffer.flip();
+            byte operation = buffer.get();
+
+            // 读取 keyLength (4 bytes)
+            buffer.clear().limit(4);
+            bytesRead = channel.read(buffer);
+            if (bytesRead != 4) {
+                break;
+            }
+            buffer.flip();
+            int keyLength = buffer.getInt();
+
+            // 读取 key
+            buffer = ensureCapacity(buffer, keyLength);
+            buffer.clear().limit(keyLength);
+            bytesRead = channel.read(buffer);
+            if (bytesRead != keyLength) {
+                break;
+            }
+            buffer.flip();
+            byte[] key = new byte[keyLength];
+            buffer.get(key);
+
+            // 读取 valueLength (4 bytes)
+            buffer.clear().limit(4);
+            bytesRead = channel.read(buffer);
+            if (bytesRead != 4) {
+                break;
+            }
+            buffer.flip();
+            int valueLength = buffer.getInt();
+
+            // 读取 value
+            byte[] value = null;
+            if (valueLength > 0) {
+                buffer = ensureCapacity(buffer, valueLength);
+                buffer.clear().limit(valueLength);
+                bytesRead = channel.read(buffer);
+                if (bytesRead != valueLength) {
+                    break;
+                }
+                buffer.flip();
+                value = new byte[valueLength];
+                buffer.get(value);
+            }
+
+            // 校验 CRC32
+            int payloadSize = 1 + 4 + keyLength + 4 + valueLength;
+            ByteBuffer payloadBuf = ByteBuffer.allocate(payloadSize);
+            payloadBuf.put(operation);
+            payloadBuf.putInt(keyLength);
+            payloadBuf.put(key);
+            payloadBuf.putInt(valueLength);
+            if (value != null) {
+                payloadBuf.put(value);
+            }
+            CRC32 crc = new CRC32();
+            crc.update(payloadBuf.array());
+
+            if ((int) crc.getValue() != storedCrc) {
+                log.warn("WAL CRC校验失败，截断位置: {}", position);
+                break; // CRC 失败，截断后续内容
+            }
+
+            position += 4 + payloadSize;
+            callback.recoveryEntry(operation, key, value);
+        }
+    }
+
+    /**
+     * 恢复旧格式 WAL（无 CRC32，兼容升级前的文件）。
+     * 格式：Op(1B) | KeyLen(4B) | Key | ValLen(4B) | Value
+     */
+    private void recoverLegacy(FileChannel channel, RecoveryCallback callback) throws IOException {
         ByteBuffer buffer = ByteBuffer.allocate(1024);
         long position = 0;
         long fileSize = channel.size();
@@ -230,7 +355,6 @@ public class WALManager {
                 buffer.get(value);
             }
             position += 1 + 4 + keyLength + 4 + valueLength;
-
             callback.recoveryEntry(operation, key, value);
         }
     }
@@ -274,9 +398,17 @@ public class WALManager {
 
         compressor.submit(() -> {
             try {
+                if (!targetFile.exists()) {
+                    log.debug("WAL压缩跳过: 文件已删除 {}", targetFile.getName());
+                    return;
+                }
                 compactWAL(targetFile);
             } catch (IOException e) {
-                log.error("WAL压缩失败", e);
+                if (targetFile.exists()) {
+                    log.error("WAL压缩失败: {}", targetFile.getName(), e);
+                } else {
+                    log.debug("WAL压缩跳过: 文件已被清理 {}", targetFile.getName());
+                }
             }
         });
         openWAL();
@@ -286,17 +418,31 @@ public class WALManager {
         Map<byte[], WALEntry> operations = new HashMap<>();
         try (FileChannel channel = FileChannel.open(walFile.toPath(), StandardOpenOption.READ)) {
             ByteBuffer buffer = ByteBuffer.allocate(1024);
-            long position = 0;
             long fileSize = channel.size();
+
+            // 跳过魔数头（旋转文件必然是新格式）
+            long position = WAL_HEADER_SIZE;
+
             while (position < fileSize) {
-                buffer.clear().limit(1);
+                // 读取 CRC32 (4 bytes)
+                buffer.clear().limit(4);
                 int bytesRead = channel.read(buffer);
+                if (bytesRead != 4) {
+                    break;
+                }
+                buffer.flip();
+                int storedCrc = buffer.getInt();
+
+                // 读取 operation (1 byte)
+                buffer.clear().limit(1);
+                bytesRead = channel.read(buffer);
                 if (bytesRead != 1) {
                     break;
                 }
                 buffer.flip();
                 byte operation = buffer.get();
 
+                // 读取 keyLength (4 bytes)
                 buffer.clear().limit(4);
                 bytesRead = channel.read(buffer);
                 if (bytesRead != 4) {
@@ -305,6 +451,7 @@ public class WALManager {
                 buffer.flip();
                 int keyLength = buffer.getInt();
 
+                // 读取 key
                 buffer = ensureCapacity(buffer, keyLength);
                 buffer.clear().limit(keyLength);
                 bytesRead = channel.read(buffer);
@@ -315,8 +462,7 @@ public class WALManager {
                 byte[] key = new byte[keyLength];
                 buffer.get(key);
 
-                position += 1 + 4 + keyLength;
-
+                // 读取 valueLength (4 bytes)
                 buffer.clear().limit(4);
                 bytesRead = channel.read(buffer);
                 if (bytesRead != 4) {
@@ -325,6 +471,7 @@ public class WALManager {
                 buffer.flip();
                 int valueLength = buffer.getInt();
 
+                // 读取 value
                 byte[] value = null;
                 if (valueLength > 0) {
                     buffer = ensureCapacity(buffer, valueLength);
@@ -337,8 +484,26 @@ public class WALManager {
                     value = new byte[valueLength];
                     buffer.get(value);
                 }
+
+                // 校验 CRC32
+                int payloadSize = 1 + 4 + keyLength + 4 + valueLength;
+                ByteBuffer payloadBuf = ByteBuffer.allocate(payloadSize);
+                payloadBuf.put(operation);
+                payloadBuf.putInt(keyLength);
+                payloadBuf.put(key);
+                payloadBuf.putInt(valueLength);
+                if (value != null) {
+                    payloadBuf.put(value);
+                }
+                CRC32 crc = new CRC32();
+                crc.update(payloadBuf.array());
+                if ((int) crc.getValue() != storedCrc) {
+                    log.warn("WAL压缩时CRC校验失败，截断位置: {}", position);
+                    break;
+                }
+
                 operations.put(key, new WALEntry(operation, key, value));
-                position += 4 + valueLength;
+                position += 4 + payloadSize;
             }
         } catch (IOException e) {
             log.error("读取WAL文件失败: {}", walFile.getPath(), e);
@@ -350,8 +515,11 @@ public class WALManager {
                 channel.write(entry.serialize());
             }
         } catch (IOException e) {
-            log.error("写入压缩后的WAL文件失败: {}", walFile.getPath(), e);
-            throw e;
+            if (walFile.exists()) {
+                log.error("写入压缩后的WAL文件失败: {}", walFile.getPath(), e);
+            } else {
+                log.debug("WAL压缩写入跳过: 文件已被清理 {}", walFile.getName());
+            }
         }
     }
 
@@ -375,7 +543,12 @@ public class WALManager {
                     StandardOpenOption.TRUNCATE_EXISTING
             );
 
-            currentSize = 0;
+            // 写入版本魔数头
+            ByteBuffer header = ByteBuffer.allocate(WAL_HEADER_SIZE);
+            header.putInt(WAL_MAGIC);
+            header.flip();
+            channel.write(header);
+            currentSize = WAL_HEADER_SIZE;
         }
     }
 
@@ -404,7 +577,6 @@ public class WALManager {
     }
 
     public class WALEntry {
-        private static final int LOG_ENTRY_SIZE = 1 + 4 + 4;
 
         private final byte operation;
         private final byte[] key;
@@ -416,17 +588,32 @@ public class WALManager {
             this.value = value;
         }
 
+        /**
+         * 序列化为带 CRC32 校验的字节缓冲区。
+         * 格式：CRC32(4B) | Op(1B) | KeyLen(4B) | Key | ValLen(4B) | Value
+         */
         public ByteBuffer serialize() {
             int valueLength = value == null ? 0 : value.length;
-            ByteBuffer buffer = ByteBuffer.allocate(LOG_ENTRY_SIZE + key.length + valueLength);
+            int payloadSize = 1 + 4 + key.length + 4 + valueLength;
 
-            buffer.put(operation);
-            buffer.putInt(key.length);
-            buffer.put(key);
-            buffer.putInt(valueLength);
+            // 先构建 payload 字节数组用于计算 CRC32
+            ByteBuffer payloadBuf = ByteBuffer.allocate(payloadSize);
+            payloadBuf.put(operation);
+            payloadBuf.putInt(key.length);
+            payloadBuf.put(key);
+            payloadBuf.putInt(valueLength);
             if (value != null) {
-                buffer.put(value);
+                payloadBuf.put(value);
             }
+            byte[] payload = payloadBuf.array();
+
+            CRC32 crc = new CRC32();
+            crc.update(payload);
+
+            // 组装完整条目：CRC32(4B) + payload
+            ByteBuffer buffer = ByteBuffer.allocate(4 + payloadSize);
+            buffer.putInt((int) crc.getValue());
+            buffer.put(payload);
             buffer.flip();
             return buffer;
         }
