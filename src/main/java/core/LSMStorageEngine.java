@@ -11,9 +11,8 @@ import util.DBConfigLoader;
 
 import java.io.*;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class LSMStorageEngine implements StorageEngine {
 
@@ -27,6 +26,7 @@ public class LSMStorageEngine implements StorageEngine {
     private final Compaction compaction;
     private final MemTableState memTableState;
     private final ExecutorService flushExecutor;
+    private final AtomicReference<CompletableFuture<Void>> lastFlushFuture = new AtomicReference<>(CompletableFuture.completedFuture(null));
 
     public LSMStorageEngine(String path) throws IOException {
         this(path, new JavaSerializer<>());
@@ -43,39 +43,62 @@ public class LSMStorageEngine implements StorageEngine {
                 .setLevel0FileNumCompactionTrigger(dbConfigLoader.getLevel0FileNumCompactionTrigger())
                 .build();
         this.valueSerializer = valueSerializer;
-        this.wal = new WALManager(config.getDataDir(), config.getWalSegmentSize(), config.getFsyncStrategy());
-        this.sstableCache = new SSTableCache();
-        this.versionSet = new VersionSet(config.getDataDir(), 7);
-        this.versionSet.loadFromDisk();
-        this.compaction = new Compaction(config, versionSet);
-        // memTableState 必须在 wal.init() 之前初始化，因为 RecoveryHandler 会引用它
-        this.memTableState = new MemTableState(new MemTable(wal, config.getMemTableThreshold()));
-        this.flushExecutor = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "memtable-flush");
-            t.setDaemon(true);
-            return t;
-        });
-        wal.init(new RecoveryHandler());
+        Components c = initComponents(config);
+        this.wal = c.wal;
+        this.sstableCache = c.sstableCache;
+        this.versionSet = c.versionSet;
+        this.compaction = c.compaction;
+        this.memTableState = c.memTableState;
+        this.flushExecutor = c.flushExecutor;
     }
 
     // 供子类（如 MasterNode）传入已有 Config 的构造器
     protected LSMStorageEngine(Config config) throws IOException {
         this.config = config;
         this.valueSerializer = new JavaSerializer<>();
-        this.wal = new WALManager(config.getDataDir(), config.getWalSegmentSize(), config.getFsyncStrategy());
-        this.sstableCache = new SSTableCache();
-        this.versionSet = new VersionSet(config.getDataDir(), 7);
-        this.versionSet.loadFromDisk();
-        this.compaction = new Compaction(config, versionSet);
+        Components c = initComponents(config);
+        this.wal = c.wal;
+        this.sstableCache = c.sstableCache;
+        this.versionSet = c.versionSet;
+        this.compaction = c.compaction;
+        this.memTableState = c.memTableState;
+        this.flushExecutor = c.flushExecutor;
+    }
+
+    /**
+     * 初始化所有引擎组件，返回组件容器。由两个构造器共用，消除重复代码。
+     */
+    private Components initComponents(Config config) throws IOException {
+        WALManager wal = new WALManager(config.getDataDir(), config.getWalSegmentSize(), config.getFsyncStrategy());
+        SSTableCache sstableCache = new SSTableCache();
+        VersionSet versionSet = new VersionSet(config.getDataDir(), 7);
+        versionSet.loadFromDisk();
+        Compaction compaction = new Compaction(config, versionSet);
+        // 启动数据完整性校验
+        DataIntegrityChecker checker = new DataIntegrityChecker(config.getDataDir(), 7);
+        DataIntegrityChecker.CheckResult checkResult = checker.checkAll();
+        if (!checkResult.isAllHealthy()) {
+            log.warn("启动时发现 {} 个损坏的SSTable文件", checkResult.corruptedFiles());
+        }
         // memTableState 必须在 wal.init() 之前初始化，因为 RecoveryHandler 会引用它
-        this.memTableState = new MemTableState(new MemTable(wal, config.getMemTableThreshold()));
-        this.flushExecutor = Executors.newSingleThreadExecutor(r -> {
+        MemTableState memTableState = new MemTableState(new MemTable(wal, config.getMemTableThreshold()));
+        ExecutorService flushExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "memtable-flush");
             t.setDaemon(true);
             return t;
         });
-        wal.init(new RecoveryHandler());
+        wal.init(new RecoveryHandler(memTableState));
+        return new Components(wal, sstableCache, versionSet, compaction, memTableState, flushExecutor);
     }
+
+    private record Components(
+            WALManager wal,
+            SSTableCache sstableCache,
+            VersionSet versionSet,
+            Compaction compaction,
+            MemTableState memTableState,
+            ExecutorService flushExecutor
+    ) {}
 
     @Override
     public void put(byte[] key, Object value) throws IOException {
@@ -135,13 +158,29 @@ public class LSMStorageEngine implements StorageEngine {
             return;
         }
         MemTable immutable = memTableState.getImmutable();
-        flushExecutor.submit(() -> {
+        CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
             try {
                 doFlush(immutable);
             } catch (IOException e) {
                 log.error("MemTable flush失败", e);
             }
-        });
+        }, flushExecutor);
+        lastFlushFuture.set(future);
+    }
+
+    /**
+     * 触发 flush 并阻塞等待完成。用于测试和关闭前确保数据落盘。
+     */
+    public void flushAndWait() throws IOException {
+        triggerFlush();
+        try {
+            lastFlushFuture.get().get(30, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("等待flush被中断", e);
+        } catch (ExecutionException | TimeoutException e) {
+            throw new IOException("等待flush失败", e);
+        }
     }
 
     /**
@@ -259,7 +298,13 @@ public class LSMStorageEngine implements StorageEngine {
         }
     }
 
-    private class RecoveryHandler implements WALManager.RecoveryCallback {
+    private static class RecoveryHandler implements WALManager.RecoveryCallback {
+        private final MemTableState memTableState;
+
+        RecoveryHandler(MemTableState memTableState) {
+            this.memTableState = memTableState;
+        }
+
         @Override
         public void recoveryEntry(byte operation, byte[] key, byte[] value) throws IOException {
             if (operation == Constants.Operation.PUT) {
