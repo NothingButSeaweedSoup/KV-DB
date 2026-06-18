@@ -1,29 +1,80 @@
 package core;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import util.ByteUtil;
 
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class WALManager {
 
+    private static final Logger log = LoggerFactory.getLogger(WALManager.class);
+
+    /** BATCH模式默认每多少条记录触发一次fsync */
+    private static final int DEFAULT_BATCH_INTERVAL = 100;
+    /** BATCH模式默认定时fsync间隔（毫秒） */
+    private static final long DEFAULT_BATCH_INTERVAL_MS = 1000;
+    /** ASYNC模式默认定时fsync间隔（毫秒） */
+    private static final long DEFAULT_ASYNC_INTERVAL_MS = 1000;
+
     private final String walPath;
     private final long segmentSize;
+    private final FsyncStrategy fsyncStrategy;
+    private final int batchInterval;
+    private final long batchIntervalMs;
     private FileChannel channel;
     private long currentSize;
     private final ExecutorService compressor;
+    private final AtomicInteger writeCount = new AtomicInteger(0);
+    private ScheduledExecutorService fsyncScheduler;
 
+    /**
+     * 使用默认BATCH策略创建WALManager
+     */
     public WALManager(String walPath, long segmentSize) throws IOException {
+        this(walPath, segmentSize, FsyncStrategy.BATCH);
+    }
+
+    /**
+     * 使用指定fsync策略创建WALManager
+     */
+    public WALManager(String walPath, long segmentSize, FsyncStrategy fsyncStrategy) throws IOException {
+        this(walPath, segmentSize, fsyncStrategy, DEFAULT_BATCH_INTERVAL, DEFAULT_BATCH_INTERVAL_MS);
+    }
+
+    /**
+     * 使用完全自定义参数创建WALManager
+     *
+     * @param walPath         WAL目录路径
+     * @param segmentSize     段大小（字节）
+     * @param fsyncStrategy   fsync策略
+     * @param batchInterval   BATCH模式下每隔多少条记录触发fsync
+     * @param batchIntervalMs BATCH/ASYNC模式下定时fsync间隔（毫秒）
+     */
+    public WALManager(String walPath, long segmentSize, FsyncStrategy fsyncStrategy,
+                      int batchInterval, long batchIntervalMs) throws IOException {
         if (segmentSize <= 0) {
             throw new IllegalArgumentException("WAL段大小必须大于0");
         }
+        if (fsyncStrategy == null) {
+            throw new IllegalArgumentException("fsyncStrategy不能为null");
+        }
 
         this.segmentSize = segmentSize;
+        this.fsyncStrategy = fsyncStrategy;
+        this.batchInterval = batchInterval;
+        this.batchIntervalMs = batchIntervalMs;
         this.walPath = walPath + Constants.System.FILE_SEPARATOR + "WAL" + Constants.File.WAL_EXTENSION;
 
         File walDir = new File(walPath);
@@ -31,6 +82,8 @@ public class WALManager {
             throw new IOException("创建WAL目录失败");
         }
         this.compressor = Executors.newFixedThreadPool(2);
+
+        initFsyncScheduler();
     }
 
     public void init(RecoveryCallback callback) throws IOException {
@@ -43,25 +96,56 @@ public class WALManager {
         openWAL();
     }
 
+    private void initFsyncScheduler() {
+        if (fsyncStrategy == FsyncStrategy.SYNC) {
+            return;
+        }
+
+        long intervalMs = fsyncStrategy == FsyncStrategy.ASYNC ? DEFAULT_ASYNC_INTERVAL_MS : batchIntervalMs;
+        fsyncScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "wal-fsync-" + fsyncStrategy.name().toLowerCase());
+            t.setDaemon(true);
+            return t;
+        });
+        fsyncScheduler.scheduleAtFixedRate(() -> {
+            try {
+                if (channel != null && channel.isOpen()) {
+                    channel.force(true);
+                }
+            } catch (IOException e) {
+                log.warn("定时fsync失败", e);
+            }
+        }, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+        log.info("WAL fsync策略: {}, 定时间隔: {}ms", fsyncStrategy, intervalMs);
+    }
+
     public void log(byte operation, byte[] key, byte[] value) throws IOException {
         if (key == null) {
             throw new IllegalArgumentException(Constants.Error.KEY_NULL);
         }
         WALEntry entry = new WALEntry(operation, key, value);
         ByteBuffer buffer = entry.serialize();
+        int entrySize = buffer.remaining();
 
-        if (!buffer.hasRemaining()) {
-            buffer.flip();
+        if (currentSize + entrySize > segmentSize) {
+            rotateWAL();
         }
 
         int bytesWritten = channel.write(buffer);
         currentSize += bytesWritten;
 
-        if (currentSize + buffer.remaining() > segmentSize) {
-            rotateWAL();
+        switch (fsyncStrategy) {
+            case SYNC -> channel.force(true);
+            case BATCH -> {
+                int count = writeCount.incrementAndGet();
+                if (count % batchInterval == 0) {
+                    channel.force(true);
+                }
+            }
+            case ASYNC -> {
+                // 由后台定时线程负责fsync
+            }
         }
-
-        channel.force(false);
     }
 
     private void openWAL() throws IOException {
@@ -158,14 +242,36 @@ public class WALManager {
 
         File currentWAL = new File(walPath);
         String newName = walPath + "_" + System.currentTimeMillis();
-        if (!currentWAL.renameTo(new File(newName))) {
-            throw new IOException("无法重命名WAL文件");
+        File targetFile = new File(newName);
+
+        // Windows 上文件重命名可能因句柄未释放而失败，短暂重试
+        boolean moved = false;
+        IOException lastException = null;
+        for (int i = 0; i < 10; i++) {
+            try {
+                Files.move(currentWAL.toPath(), targetFile.toPath(), StandardCopyOption.ATOMIC_MOVE);
+                moved = true;
+                break;
+            } catch (IOException e) {
+                lastException = e;
+                try {
+                    Thread.sleep(10);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
         }
+        if (!moved) {
+            openWAL();
+            throw new IOException("无法重命名WAL文件", lastException);
+        }
+
         compressor.submit(() -> {
             try {
-                compactWAL(new File(newName));
+                compactWAL(targetFile);
             } catch (IOException e) {
-                e.printStackTrace();
+                log.error("WAL压缩失败", e);
             }
         });
         openWAL();
@@ -206,36 +312,31 @@ public class WALManager {
 
                 position += 1 + 4 + keyLength;
 
-                if (operation == Constants.Operation.PUT) {
-                    buffer.clear().limit(4);
+                buffer.clear().limit(4);
+                bytesRead = channel.read(buffer);
+                if (bytesRead != 4) {
+                    break;
+                }
+                buffer.flip();
+                int valueLength = buffer.getInt();
+
+                byte[] value = null;
+                if (valueLength > 0) {
+                    buffer = ensureCapacity(buffer, valueLength);
+                    buffer.clear().limit(valueLength);
                     bytesRead = channel.read(buffer);
-                    if (bytesRead != 4) {
+                    if (bytesRead != valueLength) {
                         break;
                     }
                     buffer.flip();
-                    int valueLength = buffer.getInt();
-
-                    byte[] value = null;
-                    if (valueLength > 0) {
-                        buffer = ensureCapacity(buffer, valueLength);
-                        buffer.clear().limit(valueLength);
-                        bytesRead = channel.read(buffer);
-                        if (bytesRead != valueLength) {
-                            break;
-                        }
-                        buffer.flip();
-                        value = new byte[valueLength];
-                        buffer.get(value);
-                    }
-                    operations.put(key, new WALEntry(operation, key, value));
-                    position += 4 + valueLength;
-                } else if (operation == Constants.Operation.DELETE) {
-                    operations.put(key, new WALEntry(operation, key, null));
-                    position += 4;
+                    value = new byte[valueLength];
+                    buffer.get(value);
                 }
+                operations.put(key, new WALEntry(operation, key, value));
+                position += 4 + valueLength;
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            log.error("读取WAL文件失败: {}", walFile.getPath(), e);
             throw e;
         }
 
@@ -244,7 +345,7 @@ public class WALManager {
                 channel.write(entry.serialize());
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            log.error("写入压缩后的WAL文件失败: {}", walFile.getPath(), e);
             throw e;
         }
     }
@@ -275,9 +376,15 @@ public class WALManager {
 
     public void close() throws IOException {
         if (channel != null) {
+            // 关闭前确保所有数据已刷盘
+            channel.force(true);
             channel.close();
             channel = null;
         }
+        if (fsyncScheduler != null) {
+            fsyncScheduler.shutdown();
+        }
+        compressor.shutdown();
     }
 
     public String getWalPath() {
@@ -302,19 +409,14 @@ public class WALManager {
         }
 
         public ByteBuffer serialize() {
-            ByteBuffer buffer;
-            if (value == null) {
-                buffer = ByteBuffer.allocate(LOG_ENTRY_SIZE + key.length);
-            } else {
-                buffer = ByteBuffer.allocate(LOG_ENTRY_SIZE + key.length + value.length);
-            }
-
+            int valueLength = value == null ? 0 : value.length;
+            ByteBuffer buffer = ByteBuffer.allocate(LOG_ENTRY_SIZE + key.length + valueLength);
 
             buffer.put(operation);
             buffer.putInt(key.length);
             buffer.put(key);
+            buffer.putInt(valueLength);
             if (value != null) {
-                buffer.putInt(value.length);
                 buffer.put(value);
             }
             buffer.flip();
