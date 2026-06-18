@@ -1,5 +1,7 @@
 {
   "walSegmentSize": 10485760,
   "memTableThreshold": 4194304,
-  "fsyncStrategy": "BATCH"
+  "fsyncStrategy": "BATCH",
+  "sstTargetFileSize": 8388608,
+  "level0FileNumCompactionTrigger": 4
 }
