@@ -201,6 +201,20 @@ public class LSMStorageEngine implements StorageEngine {
     }
 
     /**
+     * 获取 VersionSet，用于快照等高级操作。
+     */
+    public VersionSet getVersionSet() {
+        return versionSet;
+    }
+
+    /**
+     * 获取数据目录。
+     */
+    public String getDataDir() {
+        return config.getDataDir();
+    }
+
+    /**
      * 将 immutable MemTable 的数据写入 Level 0 SSTable。
      */
     private void doFlush(MemTable immutable) throws IOException {

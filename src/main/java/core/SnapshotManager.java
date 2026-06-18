@@ -36,14 +36,27 @@ public class SnapshotManager {
     }
 
     /**
-     * 创建全量快照。
+     * 创建全量快照到默认快照目录。
      *
      * @return 快照元数据
      */
     public SnapshotInfo createSnapshot() throws IOException {
         String timestamp = LocalDateTime.now().format(SNAPSHOT_TIME_FMT);
         String snapshotPath = snapshotDir + File.separator + "snapshot-" + timestamp;
-        Path targetDir = Path.of(snapshotPath);
+        return createSnapshotAt(Path.of(snapshotPath), timestamp);
+    }
+
+    /**
+     * 创建全量快照到指定目录。
+     *
+     * @param targetDir 目标快照目录
+     * @return 快照元数据
+     */
+    public SnapshotInfo createSnapshotAt(Path targetDir) throws IOException {
+        return createSnapshotAt(targetDir, LocalDateTime.now().format(SNAPSHOT_TIME_FMT));
+    }
+
+    private SnapshotInfo createSnapshotAt(Path targetDir, String timestamp) throws IOException {
         Files.createDirectories(targetDir);
 
         int totalFiles = 0;
@@ -75,6 +88,7 @@ public class SnapshotManager {
         }
 
         // 保存快照元数据
+        String snapshotPath = targetDir.toString();
         SnapshotInfo info = new SnapshotInfo(timestamp, snapshotPath, totalFiles, totalBytes, copiedFiles);
         saveSnapshotInfo(targetDir, info);
 
