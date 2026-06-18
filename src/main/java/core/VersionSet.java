@@ -98,6 +98,13 @@ public class VersionSet {
     }
 
     /**
+     * 获取最大层级数。
+     */
+    public int getMaxLevel() {
+        return maxLevel;
+    }
+
+    /**
      * 获取指定层级的 SSTable 数量。
      */
     public int getLevelSize(int level) {

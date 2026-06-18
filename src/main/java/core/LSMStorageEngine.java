@@ -9,6 +9,9 @@ import serializer.Serializer;
 import util.ByteUtil;
 import util.DBConfigLoader;
 
+import metrics.MetricRegistry;
+import metrics.Metrics;
+
 import java.io.*;
 import java.util.Map;
 import java.util.concurrent.*;
@@ -88,6 +91,8 @@ public class LSMStorageEngine implements StorageEngine {
             return t;
         });
         wal.init(new RecoveryHandler(memTableState));
+        // 初始化 Metrics，绑定 MemTableState 和 VersionSet 的 Gauge
+        Metrics.init(new Metrics.MetricsConfig(memTableState, versionSet));
         return new Components(wal, sstableCache, versionSet, compaction, memTableState, flushExecutor);
     }
 
@@ -105,10 +110,14 @@ public class LSMStorageEngine implements StorageEngine {
         if (key == null) {
             throw new IllegalArgumentException(Constants.Error.KEY_NULL);
         }
+        long start = System.currentTimeMillis();
         memTableState.getActive().put(key, serializeObject(value));
         if (memTableState.isActiveFull()) {
             triggerFlush();
         }
+        MetricRegistry reg = MetricRegistry.getInstance();
+        reg.counter(Metrics.PUT_COUNT, "").increment();
+        reg.histogram(Metrics.PUT_LATENCY, "").observe(System.currentTimeMillis() - start);
     }
 
     @Override
@@ -116,16 +125,23 @@ public class LSMStorageEngine implements StorageEngine {
         if (key == null) {
             throw new IllegalArgumentException(Constants.Error.KEY_NULL);
         }
+        long start = System.currentTimeMillis();
         // 1. 查 MemTable（active + immutable）
         byte[] value = memTableState.get(key);
         if (value == Constants.Tombstone.TOMBSTONE) {
+            MetricRegistry.getInstance().counter(Metrics.GET_COUNT, "").increment();
+            MetricRegistry.getInstance().histogram(Metrics.GET_LATENCY, "").observe(System.currentTimeMillis() - start);
             return null;
         }
         if (value != null) {
+            MetricRegistry.getInstance().counter(Metrics.GET_COUNT, "").increment();
+            MetricRegistry.getInstance().histogram(Metrics.GET_LATENCY, "").observe(System.currentTimeMillis() - start);
             return deserializeObject(value);
         }
         // 2. 查 SSTable（通过 VersionSet 过滤）
         value = findInSSTable(key);
+        MetricRegistry.getInstance().counter(Metrics.GET_COUNT, "").increment();
+        MetricRegistry.getInstance().histogram(Metrics.GET_LATENCY, "").observe(System.currentTimeMillis() - start);
         if (value != null && value != Constants.Tombstone.TOMBSTONE) {
             return deserializeObject(value);
         }
@@ -141,6 +157,7 @@ public class LSMStorageEngine implements StorageEngine {
         if (memTableState.isActiveFull()) {
             triggerFlush();
         }
+        MetricRegistry.getInstance().counter(Metrics.DELETE_COUNT, "").increment();
     }
 
     @Override
@@ -187,6 +204,7 @@ public class LSMStorageEngine implements StorageEngine {
      * 将 immutable MemTable 的数据写入 Level 0 SSTable。
      */
     private void doFlush(MemTable immutable) throws IOException {
+        long flushStart = System.currentTimeMillis();
         Map<byte[], byte[]> data = immutable.snapshot();
         if (data.isEmpty()) {
             memTableState.clearImmutable();
@@ -213,6 +231,9 @@ public class LSMStorageEngine implements StorageEngine {
         // 异步触发 compaction
         compaction.checkAndCompactAsync();
 
+        MetricRegistry reg = MetricRegistry.getInstance();
+        reg.counter(Metrics.FLUSH_COUNT, "").increment();
+        reg.histogram(Metrics.FLUSH_DURATION, "").observe(System.currentTimeMillis() - flushStart);
         log.debug("MemTable flush完成: {} entries -> {}", entries, sstablePath);
     }
 

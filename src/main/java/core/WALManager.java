@@ -1,5 +1,7 @@
 package core;
 
+import metrics.MetricRegistry;
+import metrics.Metrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import util.ByteUtil;
@@ -287,6 +289,7 @@ public class WALManager {
             crc.update(payloadBuf.array());
 
             if ((int) crc.getValue() != storedCrc) {
+                MetricRegistry.getInstance().counter(Metrics.WAL_CRC_FAILURE_COUNT, "").increment();
                 log.warn("WAL CRC校验失败，截断位置: {}", position);
                 break; // CRC 失败，截断后续内容
             }
@@ -367,6 +370,7 @@ public class WALManager {
     }
 
     private void rotateWAL() throws IOException {
+        MetricRegistry.getInstance().counter(Metrics.WAL_ROTATE_COUNT, "").increment();
         channel.close();
 
         File currentWAL = new File(walPath);
@@ -498,6 +502,7 @@ public class WALManager {
                 CRC32 crc = new CRC32();
                 crc.update(payloadBuf.array());
                 if ((int) crc.getValue() != storedCrc) {
+                    MetricRegistry.getInstance().counter(Metrics.WAL_CRC_FAILURE_COUNT, "").increment();
                     log.warn("WAL压缩时CRC校验失败，截断位置: {}", position);
                     break;
                 }

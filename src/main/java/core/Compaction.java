@@ -1,6 +1,8 @@
 package core;
 
 import config.Config;
+import metrics.MetricRegistry;
+import metrics.Metrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import util.ByteUtil;
@@ -85,6 +87,7 @@ public class Compaction {
     }
 
     private void doCompact(int level) throws IOException {
+        long start = System.currentTimeMillis();
         List<VersionSet.SSTableMeta> levelMetas = versionSet.getLevel(level);
         if (levelMetas.isEmpty()) {
             return;
@@ -151,6 +154,9 @@ public class Compaction {
             new File(meta.filePath()).delete();
         }
 
+        MetricRegistry reg = MetricRegistry.getInstance();
+        reg.counter(Metrics.COMPACTION_COUNT, "").increment();
+        reg.histogram(Metrics.COMPACTION_DURATION, "").observe(System.currentTimeMillis() - start);
         log.info("Compaction完成: level-{} -> level-{}, 输入{}个文件, 输出{}个文件",
                 level, nextLevel, removedMetas.size(), newMetas.size());
     }
