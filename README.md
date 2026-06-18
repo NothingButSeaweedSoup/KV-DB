@@ -1,6 +1,6 @@
 # KV-DB
 
-基于 LSM 树的高性能键值存储数据库，Java 21 开发，支持单机模式与主从集群模式。
+基于 LSM 树的高性能键值存储数据库，Java 21 开发，支持单机模式与 **Raft 分布式共识集群** (基于 Apache Ratis)。
 
 ## 核心能力
 
@@ -16,10 +16,17 @@
 - 快照与增量备份：全量快照复制、基于时间戳的增量备份
 - 配置热加载：ConfigWatcher 轮询 db-config.json，变更自动通知
 
-**集群**
+**集群 (旧版，已废弃)**
 - 主从异步/同步复制：ReplicationMessage 自定义二进制序列化，ACK 确认
 - 心跳检测：HeartbeatManager 周期心跳，连接池复用，超时标记离线
 - 复制序列号持久化：崩溃恢复后断点续传
+
+**集群 (Raft 共识)**
+- Apache Ratis 3.2.2 共识引擎：Leader 选举 + 日志复制 + 安全保证
+- KvStoreStateMachine：将 LSM 存储引擎封装为 Raft 状态机
+- PUT/DELETE/FLUSH 全量操作通过 Raft 日志复制，强一致性保证
+- 快照与日志截断：Ratis 定期触发 `takeSnapshot()`，复制 SSTable 到快照目录
+- 节点重启自动恢复：检测已有存储目录使用 `RECOVER`，新节点用 `FORMAT`
 
 **网络协议**
 - 二进制帧协议：Magic(2B) + Version + Cmd + ReqId + KeyLen + Key + ValLen + Value
@@ -55,8 +62,14 @@ src/main/java/
     DataIntegrityChecker   启动时数据完整性校验
   metrics/       MetricRegistry / PrometheusExporter / MetricsHttpServer
   protocol/      二进制帧协议定义
+  raft/          Raft 共识层（基于 Apache Ratis）
+    KvStoreStateMachine   Ratis 状态机，包装 LSMStorageEngine
+    RaftConfig / RaftConfigLoader   Raft 集群配置
+    RaftServerBootstrap   Ratis 服务端构建器
+    RaftKVClient          Raft 异步客户端（带重试）
+    Command / CommandCodec   命令定义与二进制编解码
   serializer/    可插拔序列化器
-  server/        NioServer (NIO) / DBServer (阻塞IO) / ClusterStarter
+  server/        NioServer (NIO) / DBServer (阻塞IO) / ClusterStarter / RaftNodeServer
   util/          BloomFilter / ByteUtil / ConfigLoader / ConfigWatcher
 
 src/test/java/
@@ -64,6 +77,12 @@ src/test/java/
   cluster/       集群模块测试
   protocol/      协议编解码 + 端到端测试
   metrics/       Metrics 模块测试
+  raft/          Raft 共识层测试
+    CommandCodecTest          命令编解码单元测试
+    KvStoreStateMachineTest   状态机单元测试
+    RaftSingleNodeTest        单节点集成测试
+    RaftClusterTest           三节点集群集成测试（Leader 切换/故障转移/快照恢复）
+    RaftStressTest            压力测试（多线程高并发写入）
   serializer/    序列化器测试
   util/          工具类测试
 ```
@@ -102,13 +121,58 @@ flush                刷新数据到磁盘
 exit                 退出
 ```
 
-### 集群模式
+### 集群模式 (旧版，已废弃)
 
 编辑 `cluster-config.json` 配置节点信息，然后启动：
 
 ```bash
 # 启动集群（根据配置自动启动主从节点）
 java -cp target/classes server.ClusterStarter
+```
+
+### Raft 分布式集群
+
+编辑 `raft-config.json` 配置 Raft 节点信息：
+
+```json
+{
+  "groupId": "raft-kvdb",
+  "nodeId": "n1",
+  "dataDir": "./raft-data",
+  "peers": [
+    {"id": "n1", "host": "localhost", "port": 10081}
+  ]
+}
+```
+
+三节点集群参考 `raft-config-3node.json`。
+
+#### 启动 Raft 节点
+
+```bash
+# 启动单节点
+java -cp target/classes server.RaftNodeServer raft-config.json
+```
+
+#### Raft CLI
+
+```bash
+# 启动 CLI（自动连接单节点 Raft 集群）
+java -cp target/classes cli.RaftCLI raft-config.json
+
+# 或通过 Docker / 生产环境启动（先编译打包）
+mvn package -Pall
+java -jar target/KV-DB-1.0-SNAPSHOT.jar cli.RaftCLI raft-config.json
+```
+
+CLI 命令：
+
+```
+put <key> <value>    写入键值对（通过 Raft 共识）
+get <key>            查询键值（从当前节点本地读取）
+delete <key>         删除键值（通过 Raft 共识）
+flush                刷新数据到磁盘（通过 Raft 共识）
+exit                 退出
 ```
 
 ### NIO 二进制协议服务端
@@ -167,6 +231,7 @@ mvn package -Pall          # 全部打包
 
 - Java 21
 - LSM 树存储引擎
+- Apache Ratis 3.2.2 分布式共识引擎
 - NIO Selector Reactor 网络模型
 - JUnit 5 + AssertJ + Mockito 测试框架
 - JMH 性能基准测试
