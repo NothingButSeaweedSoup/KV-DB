@@ -73,7 +73,7 @@ public class CommandLineInterface {
                         } else {
                             out.println("键不存在。");
                         }
-                    } catch (IOException | ClassNotFoundException e) {
+                    } catch (IOException e) {
                         out.println("查询失败: " + e.getMessage());
                     }
                     break;

@@ -1,10 +1,16 @@
 package cluster;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.*;
 import java.net.Socket;
 import java.util.List;
 
 public class ClusterManager {
+
+    private static final Logger log = LoggerFactory.getLogger(ClusterManager.class);
+
     private List<ClusterNode> nodes;
 
     public ClusterManager(List<ClusterNode> nodes) {
@@ -27,7 +33,7 @@ public class ClusterManager {
                         }
                     }
                 } catch (IOException e) {
-                    e.printStackTrace();
+                    log.error("同步数据到从节点 {}:{} 失败", node.getHost(), node.getPort(), e);
                 }
             }
         }

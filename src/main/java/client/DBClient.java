@@ -1,9 +1,15 @@
 package client;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.*;
 import java.net.*;
 
 public class DBClient {
+
+    private static final Logger log = LoggerFactory.getLogger(DBClient.class);
+
     private Socket socket;
     private String host;
     private int port;
@@ -39,12 +45,12 @@ public class DBClient {
                     }
                 }
             } catch (IOException e) {
-                e.printStackTrace();
+                log.error("客户端通信异常", e);
             } finally {
                 try {
                     socket.close();
                 } catch (IOException e) {
-                    e.printStackTrace();
+                    log.warn("关闭socket失败", e);
                 }
             }
         }
@@ -57,7 +63,7 @@ public class DBClient {
         try {
             client.start();
         } catch (IOException e) {
-            e.printStackTrace();
+            log.error("连接服务器失败", e);
         }
     }
 }
