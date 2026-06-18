@@ -7,6 +7,16 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class MemTable {
+
+    /**
+     * 每条记录的固定开销（跳表节点指针、对象头等）
+     */
+    private static final int ENTRY_OVERHEAD = 32;
+    /**
+     * 墓碑标记的固定开销
+     */
+    private static final int TOMBSTONE_OVERHEAD = 16;
+
     private final ConcurrentSkipListMap<byte[], byte[]> table;
     private final WALManager wal;
     private final AtomicLong size;
@@ -37,15 +47,15 @@ public class MemTable {
         if (key == null) {
             throw new IllegalArgumentException(Constants.Error.KEY_NULL);
         }
-        long entrySize = key.length;
-        if (value != null) {
-            entrySize += value.length;
-        }
+        long newEntrySize = key.length + (value != null ? value.length : 0) + ENTRY_OVERHEAD;
         byte[] oldValue = table.put(key, value);
         if (oldValue != null) {
-            size.addAndGet(entrySize - oldValue.length);
+            // 更新已有key：新值大小 - 旧值大小（旧值不含key的开销，因为key未变）
+            long oldEntrySize = oldValue.length + ENTRY_OVERHEAD;
+            size.addAndGet(newEntrySize - oldEntrySize);
         } else {
-            size.addAndGet(entrySize);
+            // 新增key
+            size.addAndGet(newEntrySize);
         }
     }
 
@@ -70,9 +80,12 @@ public class MemTable {
         }
         byte[] oldValue = table.get(key);
         if (oldValue != null) {
-            size.addAndGet(key.length - (key.length + oldValue.length));
+            // 已有key：移除旧value开销，替换为墓碑开销
+            long oldEntrySize = oldValue.length + ENTRY_OVERHEAD;
+            size.addAndGet(TOMBSTONE_OVERHEAD - oldEntrySize);
         } else {
-            size.addAndGet(key.length);
+            // 新key写入墓碑：需要存储key + 墓碑开销
+            size.addAndGet(key.length + TOMBSTONE_OVERHEAD);
         }
         table.put(key, Constants.Tombstone.TOMBSTONE);
     }
