@@ -1,5 +1,6 @@
 package util;
 
+import config.Config;
 import core.FsyncStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -123,11 +124,11 @@ public class ConfigWatcher {
         } catch (IOException e) {
             log.warn("加载配置文件失败，使用默认配置", e);
             return new WatchedConfig(
-                    FsyncStrategy.BATCH,
-                    1024 * 1024,
-                    4 * 1024 * 1024,
-                    8 * 1024 * 1024,
-                    4
+                    Config.Defaults.FSYNC_STRATEGY,
+                    Config.Defaults.WAL_SEGMENT_SIZE,
+                    Config.Defaults.MEM_TABLE_THRESHOLD,
+                    Config.Defaults.SST_TARGET_FILE_SIZE,
+                    Config.Defaults.LEVEL0_FILE_NUM_COMPACTION_TRIGGER
             );
         }
     }

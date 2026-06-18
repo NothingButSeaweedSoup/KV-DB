@@ -7,6 +7,7 @@ import util.ByteUtil;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -20,8 +21,10 @@ public class SSTable implements AutoCloseable {
     private final int level;
     private final ConcurrentSkipListMap<byte[], Long> index;
     private final String filePath;
+    private final boolean useMmap;
     private long fileSize;
     private FileChannel channel;
+    private MappedByteBuffer mmapBuffer;
     private FileChannel sstableChannel;
     private FileChannel indexChannel;
     private BloomFilter bloomFilter;
@@ -30,6 +33,7 @@ public class SSTable implements AutoCloseable {
         this.config = config;
         this.level = level;
         this.filePath = getSSTablePath().toString();
+        this.useMmap = false;
         this.channel = null;
         this.fileSize = 0;
         this.index = new ConcurrentSkipListMap<>(ByteUtil::compare);
@@ -39,6 +43,16 @@ public class SSTable implements AutoCloseable {
     }
 
     public SSTable(String filePath) throws IOException {
+        this(filePath, false);
+    }
+
+    /**
+     * 打开已有 SSTable 文件。
+     *
+     * @param filePath SSTable 文件路径
+     * @param useMmap  是否使用 mmap 读取
+     */
+    public SSTable(String filePath, boolean useMmap) throws IOException {
         File file = new File(filePath);
         String parentPath = file.getParent() != null ? file.getParent() : ".";
         this.config = new Config.Builder()
@@ -46,8 +60,12 @@ public class SSTable implements AutoCloseable {
                 .build();
         this.level = 0;
         this.filePath = filePath;
+        this.useMmap = useMmap;
         this.channel = FileChannel.open(file.toPath(), StandardOpenOption.READ);
         this.fileSize = channel.size();
+        if (useMmap) {
+            this.mmapBuffer = channel.map(FileChannel.MapMode.READ_ONLY, 0, fileSize);
+        }
         this.index = new ConcurrentSkipListMap<>(ByteUtil::compare);
         this.bloomFilter = new BloomFilter(10000, FALSE_POSITIVE_RATE);
         loadIndex();
@@ -66,6 +84,7 @@ public class SSTable implements AutoCloseable {
                 .build();
         this.level = 0;
         this.filePath = filePath;
+        this.useMmap = false;
         this.channel = FileChannel.open(file.toPath(),
                 StandardOpenOption.CREATE,
                 StandardOpenOption.WRITE);
@@ -174,6 +193,16 @@ public class SSTable implements AutoCloseable {
             return null;
         }
 
+        if (useMmap && mmapBuffer != null) {
+            return getFromMmap(offset);
+        }
+        return getFromChannel(offset);
+    }
+
+    /**
+     * 通过 FileChannel 读取 value。
+     */
+    private byte[] getFromChannel(long offset) throws IOException {
         ByteBuffer kyeLenBuffer = ByteBuffer.allocate(4);
         channel.position(offset);
         channel.read(kyeLenBuffer);
@@ -195,6 +224,21 @@ public class SSTable implements AutoCloseable {
         return value;
     }
 
+    /**
+     * 通过 MmappedByteBuffer 读取 value，无需系统调用。
+     */
+    private byte[] getFromMmap(long offset) {
+        int pos = (int) offset;
+        int keyLen = mmapBuffer.getInt(pos);
+        pos += 4 + keyLen; // 跳过 keyLen(4) + key
+        int valueLen = mmapBuffer.getInt(pos);
+        pos += 4; // 跳过 valueLen(4)
+        byte[] value = new byte[valueLen];
+        mmapBuffer.position(pos);
+        mmapBuffer.get(value);
+        return value;
+    }
+
     public Map<byte[], byte[]> getAll() throws IOException {
         Map<byte[], byte[]> data = new ConcurrentSkipListMap<>(ByteUtil::compare);
         for (Map.Entry<byte[], Long> entry : index.entrySet()) {
@@ -208,6 +252,11 @@ public class SSTable implements AutoCloseable {
     }
 
     public void close() throws IOException {
+        if (mmapBuffer != null) {
+            // MappedByteBuffer 没有标准的 unmap API，但可以调用 cleaner
+            // 在实际生产环境中通常由 GC 自动回收，这里显式置 null 帮助 GC
+            mmapBuffer = null;
+        }
         if (channel != null) {
             channel.close();
         }

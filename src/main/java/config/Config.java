@@ -3,6 +3,21 @@ package config;
 import core.FsyncStrategy;
 
 public class Config {
+
+    /**
+     * 默认值常量，单一来源。Config.Builder 和 DBConfigLoader 均引用此常量。
+     */
+    public static final class Defaults {
+        public static final long WAL_SEGMENT_SIZE = 1 * 1024 * 1024;       // 1MB
+        public static final long MEM_TABLE_THRESHOLD = 4 * 1024 * 1024;    // 4MB
+        public static final FsyncStrategy FSYNC_STRATEGY = FsyncStrategy.BATCH;
+        public static final long SST_TARGET_FILE_SIZE = 8 * 1024 * 1024;   // 8MB
+        public static final int LEVEL0_FILE_NUM_COMPACTION_TRIGGER = 4;
+
+        private Defaults() {
+        }
+    }
+
     private final String dataDir;
     private final long walSegmentSize;
     private final long memTableThreshold;
@@ -45,11 +60,11 @@ public class Config {
 
     public static class Builder {
         private String dataDir;
-        private long walSegmentSize = 1 * 1024 * 1024;
-        private long memTableThreshold = 4 * 1024 * 1024;
-        private FsyncStrategy fsyncStrategy = FsyncStrategy.BATCH;
-        private long sstTargetFileSize = 8 * 1024 * 1024;
-        private int level0FileNumCompactionTrigger = 4;
+        private long walSegmentSize = Defaults.WAL_SEGMENT_SIZE;
+        private long memTableThreshold = Defaults.MEM_TABLE_THRESHOLD;
+        private FsyncStrategy fsyncStrategy = Defaults.FSYNC_STRATEGY;
+        private long sstTargetFileSize = Defaults.SST_TARGET_FILE_SIZE;
+        private int level0FileNumCompactionTrigger = Defaults.LEVEL0_FILE_NUM_COMPACTION_TRIGGER;
 
         public Builder setDataDir(String dataDir) {
             this.dataDir = dataDir;

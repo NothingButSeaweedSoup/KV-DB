@@ -1,6 +1,7 @@
 package util;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import config.Config;
 import core.FsyncStrategy;
 
 import java.io.File;
@@ -20,10 +21,10 @@ public class DBConfigLoader {
         // 判断配置文件是否存在
         if (new File(DB_CONFIG_FILE_PATH).exists()) {
             var jsonNode = objectMapper.readTree(new File(DB_CONFIG_FILE_PATH));
-            this.walSegmentSize = jsonNode.has("walSegmentSize") ? jsonNode.get("walSegmentSize").asLong() : 1024 * 1024;
-            this.memTableThreshold = jsonNode.has("memTableThreshold") ? jsonNode.get("memTableThreshold").asLong() : 4 * 1024 * 1024;
-            this.sstTargetFileSize = jsonNode.has("sstTargetFileSize") ? jsonNode.get("sstTargetFileSize").asLong() : 8 * 1024 * 1024;
-            this.level0FileNumCompactionTrigger = jsonNode.has("level0FileNumCompactionTrigger") ? jsonNode.get("level0FileNumCompactionTrigger").asInt() : 4;
+            this.walSegmentSize = jsonNode.has("walSegmentSize") ? jsonNode.get("walSegmentSize").asLong() : Config.Defaults.WAL_SEGMENT_SIZE;
+            this.memTableThreshold = jsonNode.has("memTableThreshold") ? jsonNode.get("memTableThreshold").asLong() : Config.Defaults.MEM_TABLE_THRESHOLD;
+            this.sstTargetFileSize = jsonNode.has("sstTargetFileSize") ? jsonNode.get("sstTargetFileSize").asLong() : Config.Defaults.SST_TARGET_FILE_SIZE;
+            this.level0FileNumCompactionTrigger = jsonNode.has("level0FileNumCompactionTrigger") ? jsonNode.get("level0FileNumCompactionTrigger").asInt() : Config.Defaults.LEVEL0_FILE_NUM_COMPACTION_TRIGGER;
             if (jsonNode.has("fsyncStrategy")) {
                 String strategyName = jsonNode.get("fsyncStrategy").asText().toUpperCase();
                 try {
@@ -37,11 +38,11 @@ public class DBConfigLoader {
                 this.fsyncStrategy = FsyncStrategy.BATCH;
             }
         } else {
-            this.walSegmentSize = 1024 * 1024;
-            this.memTableThreshold = 4 * 1024 * 1024;
-            this.fsyncStrategy = FsyncStrategy.BATCH;
-            this.sstTargetFileSize = 8 * 1024 * 1024;
-            this.level0FileNumCompactionTrigger = 4;
+            this.walSegmentSize = Config.Defaults.WAL_SEGMENT_SIZE;
+            this.memTableThreshold = Config.Defaults.MEM_TABLE_THRESHOLD;
+            this.fsyncStrategy = Config.Defaults.FSYNC_STRATEGY;
+            this.sstTargetFileSize = Config.Defaults.SST_TARGET_FILE_SIZE;
+            this.level0FileNumCompactionTrigger = Config.Defaults.LEVEL0_FILE_NUM_COMPACTION_TRIGGER;
         }
     }
 

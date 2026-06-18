@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 import java.util.zip.CRC32;
 
 /**
@@ -86,14 +87,21 @@ public class DataIntegrityChecker {
      */
     private boolean verifySSTable(File file) {
         // 第一级：索引可加载
+        List<long[]> indexEntries; // 每项为 [keyLen, dataOffset]
+        int entries;
         try (SSTable sstable = new SSTable(file.getAbsolutePath())) {
-            int entries = sstable.getEntryCount();
+            entries = sstable.getEntryCount();
             if (entries < 0) {
                 log.warn("SSTable条目数异常: {} (entries={})", file.getName(), entries);
                 return false;
             }
             if (entries == 0) {
                 return true; // 空文件视为正常
+            }
+            // 保存索引条目用于第三级抽样
+            indexEntries = new ArrayList<>();
+            for (var entry : ((java.util.concurrent.ConcurrentSkipListMap<byte[], Long>) getIndexField(sstable)).entrySet()) {
+                indexEntries.add(new long[]{entry.getKey().length, entry.getValue()});
             }
         } catch (IOException e) {
             log.warn("SSTable索引加载失败: {} - {}", file.getName(), e.getMessage());
@@ -138,6 +146,113 @@ public class DataIntegrityChecker {
 
         } catch (IOException e) {
             log.warn("SSTable结构校验失败: {} - {}", file.getName(), e.getMessage());
+            return false;
+        }
+
+        // 第三级：数据块抽样校验
+        if (!verifyDataBlocks(file, indexEntries)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * 通过反射获取 SSTable 的 index 字段（ConcurrentSkipListMap<byte[], Long>）。
+     * 用于抽样校验，避免修改 SSTable 的公共 API。
+     */
+    private java.util.concurrent.ConcurrentSkipListMap<byte[], Long> getIndexField(SSTable sstable) {
+        try {
+            var field = SSTable.class.getDeclaredField("index");
+            field.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            var index = (java.util.concurrent.ConcurrentSkipListMap<byte[], Long>) field.get(sstable);
+            return index;
+        } catch (Exception e) {
+            throw new RuntimeException("无法访问 SSTable.index 字段", e);
+        }
+    }
+
+    /**
+     * 第三级校验：抽样读取数据块，验证偏移量和 key/value 长度合法。
+     * <p>
+     * 随机选取最多 5 个索引条目，读取对应偏移量处的数据块，
+     * 校验 keyLen(4B) + key + valLen(4B) + value 不超出索引区域。
+     */
+    private boolean verifyDataBlocks(File file, List<long[]> indexEntries) {
+        if (indexEntries.isEmpty()) {
+            return true;
+        }
+
+        int sampleCount = Math.min(5, indexEntries.size());
+        Random random = new Random(file.hashCode()); // 固定种子，保证可重复
+
+        try (FileChannel channel = FileChannel.open(file.toPath(), StandardOpenOption.READ)) {
+            long fileSize = channel.size();
+
+            // 读取索引偏移量（数据区上界）
+            ByteBuffer offsetBuf = ByteBuffer.allocate(8);
+            channel.position(fileSize - 8);
+            channel.read(offsetBuf);
+            offsetBuf.flip();
+            long indexOffset = offsetBuf.getLong();
+
+            for (int i = 0; i < sampleCount; i++) {
+                long[] entry = indexEntries.get(random.nextInt(indexEntries.size()));
+                long dataOffset = entry[1];
+
+                if (dataOffset < 0 || dataOffset >= indexOffset) {
+                    log.warn("SSTable数据偏移量越界: {} (offset={}, indexOffset={})",
+                            file.getName(), dataOffset, indexOffset);
+                    return false;
+                }
+
+                // 读取 keyLen(4B)
+                channel.position(dataOffset);
+                ByteBuffer keyLenBuf = ByteBuffer.allocate(4);
+                if (channel.read(keyLenBuf) != 4) {
+                    log.warn("SSTable数据块读取失败: {} (offset={})", file.getName(), dataOffset);
+                    return false;
+                }
+                keyLenBuf.flip();
+                int keyLen = keyLenBuf.getInt();
+
+                if (keyLen < 0 || keyLen > 10_000_000) {
+                    log.warn("SSTable keyLen异常: {} (keyLen={})", file.getName(), keyLen);
+                    return false;
+                }
+
+                // 跳过 key，读取 valLen(4B)
+                long valLenOffset = dataOffset + 4 + keyLen;
+                if (valLenOffset + 4 > indexOffset) {
+                    log.warn("SSTable value区域越界: {} (valLenOffset={})", file.getName(), valLenOffset);
+                    return false;
+                }
+                channel.position(valLenOffset);
+                ByteBuffer valLenBuf = ByteBuffer.allocate(4);
+                if (channel.read(valLenBuf) != 4) {
+                    log.warn("SSTable valLen读取失败: {} (offset={})", file.getName(), valLenOffset);
+                    return false;
+                }
+                valLenBuf.flip();
+                int valLen = valLenBuf.getInt();
+
+                if (valLen < 0 || valLen > 100_000_000) {
+                    log.warn("SSTable valLen异常: {} (valLen={})", file.getName(), valLen);
+                    return false;
+                }
+
+                // 验证 value 区域不超出索引区域
+                long valueEnd = valLenOffset + 4 + valLen;
+                if (valueEnd > indexOffset) {
+                    log.warn("SSTable value数据越界: {} (valueEnd={}, indexOffset={})",
+                            file.getName(), valueEnd, indexOffset);
+                    return false;
+                }
+            }
+
+        } catch (IOException e) {
+            log.warn("SSTable数据块抽样校验失败: {} - {}", file.getName(), e.getMessage());
             return false;
         }
 
