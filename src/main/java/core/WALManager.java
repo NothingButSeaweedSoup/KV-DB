@@ -33,7 +33,8 @@ public class WALManager {
     private final FsyncStrategy fsyncStrategy;
     private final int batchInterval;
     private final long batchIntervalMs;
-    private FileChannel channel;
+    private final Object channelLock = new Object();
+    private volatile FileChannel channel;
     private long currentSize;
     private final ExecutorService compressor;
     private final AtomicInteger writeCount = new AtomicInteger(0);
@@ -109,8 +110,10 @@ public class WALManager {
         });
         fsyncScheduler.scheduleAtFixedRate(() -> {
             try {
-                if (channel != null && channel.isOpen()) {
-                    channel.force(true);
+                synchronized (channelLock) {
+                    if (channel != null && channel.isOpen()) {
+                        channel.force(true);
+                    }
                 }
             } catch (IOException e) {
                 log.warn("定时fsync失败", e);
@@ -127,23 +130,25 @@ public class WALManager {
         ByteBuffer buffer = entry.serialize();
         int entrySize = buffer.remaining();
 
-        if (currentSize + entrySize > segmentSize) {
-            rotateWAL();
-        }
-
-        int bytesWritten = channel.write(buffer);
-        currentSize += bytesWritten;
-
-        switch (fsyncStrategy) {
-            case SYNC -> channel.force(true);
-            case BATCH -> {
-                int count = writeCount.incrementAndGet();
-                if (count % batchInterval == 0) {
-                    channel.force(true);
-                }
+        synchronized (channelLock) {
+            if (currentSize + entrySize > segmentSize) {
+                rotateWAL();
             }
-            case ASYNC -> {
-                // 由后台定时线程负责fsync
+
+            int bytesWritten = channel.write(buffer);
+            currentSize += bytesWritten;
+
+            switch (fsyncStrategy) {
+                case SYNC -> channel.force(true);
+                case BATCH -> {
+                    int count = writeCount.incrementAndGet();
+                    if (count % batchInterval == 0) {
+                        channel.force(true);
+                    }
+                }
+                case ASYNC -> {
+                    // 由后台定时线程负责fsync
+                }
             }
         }
     }
@@ -351,38 +356,41 @@ public class WALManager {
     }
 
     public void clear() throws IOException {
-        if (channel != null) {
-            channel.close();
-        }
-        // 删除旧的WAL文件
-        for (File file : Objects.requireNonNull(new File(walPath).getParentFile().listFiles())) {
-            if (file.getName().matches(".*\\.wal(_\\d+)?")) {
-                file.delete();
+        synchronized (channelLock) {
+            if (channel != null) {
+                channel.close();
             }
+            // 删除旧的WAL文件
+            for (File file : Objects.requireNonNull(new File(walPath).getParentFile().listFiles())) {
+                if (file.getName().matches(".*\\.wal(_\\d+)?")) {
+                    file.delete();
+                }
+            }
+
+            // 重新打开WAL文件，截断为0
+            channel = FileChannel.open(
+                    new File(walPath).toPath(),
+                    StandardOpenOption.CREATE,
+                    StandardOpenOption.WRITE,
+                    StandardOpenOption.TRUNCATE_EXISTING
+            );
+
+            currentSize = 0;
         }
-
-        // 重新打开WAL文件，截断为0
-        channel = FileChannel.open(
-                new File(walPath).toPath(),
-                StandardOpenOption.CREATE,
-                StandardOpenOption.WRITE,
-                StandardOpenOption.TRUNCATE_EXISTING
-        );
-
-        currentSize = 0;
-
-
     }
 
     public void close() throws IOException {
-        if (channel != null) {
-            // 关闭前确保所有数据已刷盘
-            channel.force(true);
-            channel.close();
-            channel = null;
-        }
+        // 先关闭调度器，停止后台fsync
         if (fsyncScheduler != null) {
             fsyncScheduler.shutdown();
+        }
+        synchronized (channelLock) {
+            if (channel != null) {
+                // 关闭前确保所有数据已刷盘
+                channel.force(true);
+                channel.close();
+                channel = null;
+            }
         }
         compressor.shutdown();
     }

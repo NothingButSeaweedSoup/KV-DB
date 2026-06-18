@@ -3,6 +3,7 @@ package core;
 import util.ByteUtil;
 
 import java.io.IOException;
+import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -21,6 +22,7 @@ public class MemTable {
     private final WALManager wal;
     private final AtomicLong size;
     private final long maxSize;
+    private volatile boolean immutable;
 
     public MemTable(WALManager wal, long maxSize) {
         if (maxSize <= 0) {
@@ -30,9 +32,13 @@ public class MemTable {
         this.wal = wal;
         this.size = new AtomicLong(0);
         this.maxSize = maxSize;
+        this.immutable = false;
     }
 
     public void put(byte[] key, byte[] value) throws IOException {
+        if (immutable) {
+            throw new IllegalStateException("不可变MemTable不支持写入");
+        }
         if (key == null) {
             throw new IllegalArgumentException(Constants.Error.KEY_NULL);
         }
@@ -44,6 +50,9 @@ public class MemTable {
     }
 
     public void putWithoutWAL(byte[] key, byte[] value) {
+        if (immutable) {
+            throw new IllegalStateException("不可变MemTable不支持写入");
+        }
         if (key == null) {
             throw new IllegalArgumentException(Constants.Error.KEY_NULL);
         }
@@ -67,6 +76,9 @@ public class MemTable {
     }
 
     public void delete(byte[] key) throws IOException {
+        if (immutable) {
+            throw new IllegalStateException("不可变MemTable不支持写入");
+        }
         if (key == null) {
             throw new IllegalArgumentException(Constants.Error.KEY_NULL);
         }
@@ -75,6 +87,9 @@ public class MemTable {
     }
 
     public void deleteWithoutWAL(byte[] key) {
+        if (immutable) {
+            throw new IllegalStateException("不可变MemTable不支持写入");
+        }
         if (key == null) {
             throw new IllegalArgumentException(Constants.Error.KEY_NULL);
         }
@@ -101,6 +116,35 @@ public class MemTable {
     public void flush() throws IOException {
         table.clear();
         size.set(0);
+    }
+
+    /**
+     * 将此MemTable冻结为不可变状态，冻结后不支持写入操作。
+     */
+    public void freeze() {
+        this.immutable = true;
+    }
+
+    /**
+     * 撤销冻结，将此MemTable恢复为可变状态。
+     * 仅用于 switchActive CAS 失败时的回滚。
+     */
+    public void unfreeze() {
+        this.immutable = false;
+    }
+
+    /**
+     * 返回此MemTable是否为不可变状态。
+     */
+    public boolean isImmutable() {
+        return immutable;
+    }
+
+    /**
+     * 返回数据的不可变快照视图。
+     */
+    public Map<byte[], byte[]> snapshot() {
+        return Map.copyOf(table);
     }
 
     public Iterable<ConcurrentSkipListMap.Entry<byte[], byte[]>> iterator() {
