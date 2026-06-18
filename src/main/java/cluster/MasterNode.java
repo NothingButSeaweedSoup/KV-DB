@@ -10,6 +10,11 @@ import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * @deprecated 已被 {@link raft.RaftServerBootstrap} + {@link raft.KvStoreStateMachine} 替代。
+ *             使用 Apache Ratis 实现自动 Leader 选举和强一致性复制。
+ */
+@Deprecated
 public class MasterNode extends LSMStorageEngine {
 
     private static final Logger log = LoggerFactory.getLogger(MasterNode.class);

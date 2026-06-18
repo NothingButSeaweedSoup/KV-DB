@@ -8,6 +8,11 @@ import util.ConfigLoader;
 
 import java.io.IOException;
 
+/**
+ * @deprecated 已被 {@link server.RaftNodeServer} 替代。
+ *             使用 Raft 共识协议实现分布式集群。
+ */
+@Deprecated
 public class ClusterStarter {
     public static void main(String[] args) throws IOException {
         ClusterConfig config = ConfigLoader.loadConfig();

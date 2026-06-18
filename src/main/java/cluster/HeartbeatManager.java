@@ -15,6 +15,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 主节点定期向从节点发送心跳检测，维护活跃从节点列表。
  * 对每个从节点复用持久连接，连接断开时自动重连。
  */
+/**
+ * @deprecated 已被 Apache Ratis 内置心跳机制替代。
+ *             Ratis Leader 自动向 Follower 发送心跳。
+ */
+@Deprecated
 public class HeartbeatManager {
 
     private static final Logger log = LoggerFactory.getLogger(HeartbeatManager.class);

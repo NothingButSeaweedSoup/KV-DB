@@ -8,6 +8,11 @@ import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * @deprecated 已被 Apache Ratis 内置集群管理替代。
+ *             Ratis 自动处理成员变更、日志复制和 Leader 选举。
+ */
+@Deprecated
 public class ClusterManager {
 
     private static final Logger log = LoggerFactory.getLogger(ClusterManager.class);

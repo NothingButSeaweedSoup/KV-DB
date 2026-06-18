@@ -7,6 +7,11 @@ import org.slf4j.LoggerFactory;
 import java.io.*;
 import java.net.*;
 
+/**
+ * @deprecated 已被 {@link raft.RaftServerBootstrap} + {@link raft.KvStoreStateMachine} 替代。
+ *             Ratis Follower 节点自动接收日志复制，无需手动管理。
+ */
+@Deprecated
 public class SlaveNode extends LSMStorageEngine {
 
     private static final Logger log = LoggerFactory.getLogger(SlaveNode.class);
