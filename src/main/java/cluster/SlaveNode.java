@@ -116,12 +116,10 @@ public class SlaveNode extends LSMStorageEngine {
                     // 读取数据本身
                     byte[] data = readBytes(in, dataLength);
                     // 处理接收到的数据
-                    try (ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(data))) {
-                        Object obj = ois.readObject();
-                        if (obj instanceof ReplicationMessage msg) {
-                            applyReplicationMessage(msg);
-                        }
-                    } catch (ClassNotFoundException e) {
+                    try {
+                        ReplicationMessage msg = ReplicationCodec.decode(data);
+                        applyReplicationMessage(msg);
+                    } catch (Exception e) {
                         log.error("反序列化复制消息失败", e);
                     }
                 }

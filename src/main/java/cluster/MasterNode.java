@@ -7,11 +7,8 @@ import org.slf4j.LoggerFactory;
 import java.io.*;
 import java.net.*;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 public class MasterNode extends LSMStorageEngine {
 
@@ -26,13 +23,67 @@ public class MasterNode extends LSMStorageEngine {
     private final int batchSize = 100;
     // 定时任务调度器
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-    private final AtomicLong replicationSeq = new AtomicLong(0);
+    private final AtomicLong replicationSeq;
+    // 复制偏移量持久化文件
+    private final File seqFile;
+    // 复制模式：SYNC（同步等待ACK）或 ASYNC（异步发送不等待）
+    private final ReplicationMode replicationMode;
+
+    public enum ReplicationMode {
+        /** 同步模式：等待从节点 ACK 后再返回（默认） */
+        SYNC,
+        /** 异步模式：发送后不等待 ACK，最高吞吐 */
+        ASYNC
+    }
 
     public MasterNode(String dataPath, List<ClusterNode> nodes) throws IOException {
+        this(dataPath, nodes, ReplicationMode.SYNC);
+    }
+
+    public MasterNode(String dataPath, List<ClusterNode> nodes, ReplicationMode replicationMode) throws IOException {
         super(dataPath);
         this.clusterManager = new ClusterManager(nodes);
+        this.replicationMode = replicationMode;
+        this.seqFile = new File(dataPath, "replication.seq");
+        this.replicationSeq = new AtomicLong(loadSeq());
         // 每秒检查一次是否需要同步
         scheduler.scheduleAtFixedRate(this::syncBatch, 1, 1, TimeUnit.SECONDS);
+    }
+
+    /**
+     * 从磁盘加载已持久化的 replication sequence。
+     */
+    private long loadSeq() {
+        if (!seqFile.exists()) {
+            return 0L;
+        }
+        try (DataInputStream in = new DataInputStream(new FileInputStream(seqFile))) {
+            long seq = in.readLong();
+            log.info("加载复制序列号: {}", seq);
+            return seq;
+        } catch (IOException e) {
+            log.warn("读取复制序列号失败，从 0 开始", e);
+            return 0L;
+        }
+    }
+
+    /**
+     * 持久化 replication sequence 到磁盘。
+     */
+    private void persistSeq(long seq) {
+        try (DataOutputStream out = new DataOutputStream(new FileOutputStream(seqFile))) {
+            out.writeLong(seq);
+        } catch (IOException e) {
+            log.error("持久化复制序列号失败", e);
+        }
+    }
+
+    public ReplicationMode getReplicationMode() {
+        return replicationMode;
+    }
+
+    public long getReplicationSeq() {
+        return replicationSeq.get();
     }
 
     @Override
@@ -58,11 +109,7 @@ public class MasterNode extends LSMStorageEngine {
     private byte[] serializeData(ReplicationMessage.Operation op, byte[] key, Object value) throws IOException {
         long seq = replicationSeq.incrementAndGet();
         ReplicationMessage msg = new ReplicationMessage(seq, op, key, value);
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ObjectOutputStream oos = new ObjectOutputStream(baos)) {
-            oos.writeObject(msg);
-        }
-        return baos.toByteArray();
+        return ReplicationCodec.encode(msg);
     }
 
     private synchronized void syncBatch() {
@@ -70,7 +117,15 @@ public class MasterNode extends LSMStorageEngine {
             // 拷贝当前批次并清空，避免集群同步期间阻塞写入
             List<byte[]> snapshot = List.copyOf(batch);
             batch.clear();
-            clusterManager.syncData(snapshot);
+            if (replicationMode == ReplicationMode.ASYNC) {
+                // 异步模式：提交到后台线程发送，不阻塞写路径
+                CompletableFuture.runAsync(() -> clusterManager.syncData(snapshot));
+            } else {
+                // 同步模式：阻塞等待 ACK
+                clusterManager.syncData(snapshot);
+            }
+            // 持久化当前序列号
+            persistSeq(replicationSeq.get());
         }
     }
 
@@ -78,6 +133,7 @@ public class MasterNode extends LSMStorageEngine {
     public void close() throws IOException {
         scheduler.shutdown();
         syncBatch();
+        persistSeq(replicationSeq.get());
         super.close();
     }
 
