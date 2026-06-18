@@ -18,7 +18,7 @@ public class SSTable implements AutoCloseable {
     private static final double FALSE_POSITIVE_RATE = 0.01;
     private final Config config;
     private final int level;
-    private final Map<byte[], Long> index;
+    private final ConcurrentSkipListMap<byte[], Long> index;
     private final String filePath;
     private long fileSize;
     private FileChannel channel;
@@ -220,5 +220,36 @@ public class SSTable implements AutoCloseable {
 
     public String getFilePath() {
         return filePath;
+    }
+
+    /**
+     * 获取此 SSTable 中最小的 key（按字典序）。
+     *
+     * @return 最小 key，若索引为空则返回 null
+     */
+    public byte[] getMinKey() {
+        if (index.isEmpty()) {
+            return null;
+        }
+        return index.firstKey();
+    }
+
+    /**
+     * 获取此 SSTable 中最大的 key（按字典序）。
+     *
+     * @return 最大 key，若索引为空则返回 null
+     */
+    public byte[] getMaxKey() {
+        if (index.isEmpty()) {
+            return null;
+        }
+        return index.lastKey();
+    }
+
+    /**
+     * 获取此 SSTable 中的条目数。
+     */
+    public int getEntryCount() {
+        return index.size();
     }
 }
